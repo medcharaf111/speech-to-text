@@ -2,7 +2,8 @@
 const fs = require("fs");
 const http = require("http");
 const socketIo = require("socket.io");
-const { SpeechClient } = require("@google-cloud/speech");
+// const { SpeechClient } = require("@google-cloud/speech");
+const { createClient, LiveTranscriptionEvents } = require("@deepgram/sdk");
 const { TranslationServiceClient } = require("@google-cloud/translate").v3;
 const cors = require("cors");
 const express = require("express");
@@ -12,19 +13,18 @@ const dotenv = require("dotenv");
 dotenv.config();
 
 // GCP clients (requires GOOGLE_APPLICATION_CREDENTIALS env var)
-const speechClient = new SpeechClient();
+// const speechClient = new SpeechClient();
+const speechClient = createClient(process.env.DEEPGRAM_API_KEY);
 const translateClient = new TranslationServiceClient();
 
-const currentAdminLanguage = "en-US";
-const RECORDING_CONFIG = {
-  config: {
-    encoding: "WEBM_OPUS",
-    sampleRateHertz: 48000,
-    languageCode: "en-US",
-    interimResults: true,
-  },
-  // singleUtterance: false,
-};
+// const RECORDING_CONFIG = {
+//   config: {
+//     encoding: "WEBM_OPUS",
+//     sampleRateHertz: 48000,
+//     interimResults: true,
+//   },
+//   // singleUtterance: false,
+// };
 
 const app = express();
 const server = http.createServer(app);
@@ -34,14 +34,13 @@ app.use(cors());
 app.use(express.json());
 
 let adminSocket = null;
-const clients = new Map(); // socket -> { language: 'en-US' }
+const clients = new Map(); // socket -> { language: '' }
 let recognizeStream = null;
 
 io.on("connection", (socket) => {
-  socket.on("init:admin", ({ adminLanguage = currentAdminLanguage }) => {
+  socket.on("init:admin", () => {
     adminSocket = socket;
     socket.isAdmin = true;
-    startRecognitionStream(adminLanguage);
   });
 
   socket.on("init:client", ({ language = "en-US" }) => {
@@ -58,9 +57,18 @@ io.on("connection", (socket) => {
     if (socket.isAdmin) stopRecognitionStream();
   });
 
+  socket.on("start:admin", ({ adminLanguage }) => {
+    if (socket.isAdmin) {
+      console.log(`Admin requested start with language: ${adminLanguage}`);
+      stopRecognitionStream(); // Ensure any previous stream is stopped
+      startRecognitionStream(adminLanguage);
+    }
+  });
+
   socket.on("audio", (audioChunk) => {
     if (socket === adminSocket && recognizeStream) {
-      recognizeStream.write(audioChunk);
+      // recognizeStream.write(audioChunk);
+      recognizeStream.send(audioChunk);
     }
   });
 
@@ -75,16 +83,50 @@ io.on("connection", (socket) => {
 });
 
 function startRecognitionStream(adminLang) {
-  RECORDING_CONFIG.config.languageCode = adminLang;
-  recognizeStream = speechClient
-    .streamingRecognize(RECORDING_CONFIG)
-    .on("data", onSpeechData)
-    .on("error", (e) => console.log(e));
+  // RECORDING_CONFIG.config.languageCode = adminLang;
+  // recognizeStream = speechClient
+  //   .streamingRecognize(RECORDING_CONFIG)
+  //   .on("data", onSpeechData)
+  //   .on("error", (e) => console.log(e));
+  recognizeStream = speechClient.listen.live({
+    model: adminLang == "en-US" ? "nova-3" : "nova-2",
+    language: adminLang,
+    smart_format: true,
+  });
+  recognizeStream.addListener(LiveTranscriptionEvents.Open, () => {
+    recognizeStream.addListener(LiveTranscriptionEvents.Transcript, (data) => {
+      const transcript = data.channel?.alternatives?.[0]?.transcript;
+      if (transcript) {
+        onSpeechData(
+          {
+            results: [
+              {
+                alternatives: [
+                  {
+                    transcript,
+                  },
+                ],
+                isFinal: true,
+              },
+            ],
+          },
+          adminLang
+        );
+      }
+    });
+    recognizeStream.addListener(LiveTranscriptionEvents.Close, () => {
+      console.log("Deepgram connection closed.");
+    });
+    recognizeStream.addListener(LiveTranscriptionEvents.Error, (error) => {
+      console.log("Deepgram error:", error);
+      stopRecognitionStream(); // Stop on error
+    });
+  });
 }
 
 function stopRecognitionStream() {
   if (!recognizeStream) return;
-  recognizeStream.destroy();
+  recognizeStream.requestClose();
   recognizeStream = null;
 }
 
@@ -92,6 +134,7 @@ async function translateText(text, targetLanguage, sourceLanguage) {
   if (targetLanguage === sourceLanguage) {
     return text;
   }
+
   try {
     const [translationResponse] = await translateClient.translateText({
       parent: `projects/${process.env.GOOGLE_PROJECT_ID}/locations/global`,
@@ -107,7 +150,7 @@ async function translateText(text, targetLanguage, sourceLanguage) {
   }
 }
 
-async function onSpeechData(data) {
+async function onSpeechData(data, adminLang) {
   if (!data.results || !data.results[0] || !data.results[0].alternatives[0]) {
     return;
   }
@@ -119,7 +162,7 @@ async function onSpeechData(data) {
     const translationPromises = [];
     for (const [socket, { language: clientLanguage }] of clients) {
       translationPromises.push(
-        translateText(text, clientLanguage, currentAdminLanguage)
+        translateText(text, clientLanguage, adminLang)
           .then((translatedText) => {
             socket.emit("transcript", { text: translatedText, isFinal, language: clientLanguage });
           })
@@ -136,9 +179,11 @@ async function onSpeechData(data) {
   }
 }
 
-const supportedLanguages = JSON.parse(fs.readFileSync("./languages.json", "utf-8"));
 // API routes for List of supported languages
 app.get("/api/languages", (req, res) => {
+  const supportedLanguages = JSON.parse(
+    fs.readFileSync(req.query.isAdmin === "true" ? "./admin_languages.json" : "./languages.json", "utf-8")
+  );
   res.json(supportedLanguages);
 });
 

@@ -1,12 +1,24 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { MdGTranslate } from "react-icons/md";
 import { IoInformationCircleSharp } from "react-icons/io5";
+import { fetchLanguages } from "../utils/api";
 
-const LanguageSelector = ({
-  languages,
-  selectedLanguage,
-  onLanguageChange,
-}) => {
+const LanguageSelector = ({ selectedLanguage, onLanguageChange, isAdmin = false }) => {
+  const [languages, setLanguages] = useState([]);
+
+  useEffect(() => {
+    // Fetch supported languages
+    const getLanguages = async () => {
+      try {
+        const languageList = await fetchLanguages(isAdmin);
+        setLanguages(languageList);
+      } catch (error) {
+        console.error("Failed to fetch languages:", error);
+      }
+    };
+
+    getLanguages();
+  }, []);
   return (
     <div className="form-group">
       <label htmlFor="languageSelect" className="form-label fw-bold">
@@ -25,10 +37,12 @@ const LanguageSelector = ({
           </option>
         ))}
       </select>
-      <div className="form-text mt-2">
-        <IoInformationCircleSharp className="me-1" size={18} />
-        Transcriptions will be displayed in this language.
-      </div>
+      {!isAdmin && (
+        <div className="form-text mt-2">
+          <IoInformationCircleSharp className="me-1" size={18} />
+          Transcriptions will be displayed in this language.
+        </div>
+      )}
     </div>
   );
 };

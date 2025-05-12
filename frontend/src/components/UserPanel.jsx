@@ -1,8 +1,6 @@
-import React from "react";
 import { useEffect, useState, useRef } from "react";
 import { io } from "socket.io-client";
 import LanguageSelector from "./LanguageSelector";
-import { fetchLanguages } from "../utils/api";
 import { BsInfoCircleFill } from "react-icons/bs";
 import { BsChatTextFill } from "react-icons/bs";
 
@@ -11,7 +9,6 @@ const wsUrl = import.meta.env.VITE_APP_API_URL;
 function UserPanel() {
   const [socket, setSocket] = useState(null);
   const [lines, setLines] = useState("");
-  const [languages, setLanguages] = useState([]);
   const [selectedLanguage, setSelectedLanguage] = useState("en-US");
   const transcriptRef = useRef(null);
 
@@ -31,18 +28,6 @@ function UserPanel() {
     });
 
     setSocket(sock);
-
-    // Fetch supported languages
-    const getLanguages = async () => {
-      try {
-        const languageList = await fetchLanguages();
-        setLanguages(languageList);
-      } catch (error) {
-        console.error("Failed to fetch languages:", error);
-      }
-    };
-
-    getLanguages();
 
     return () => sock.disconnect();
   }, []);
@@ -73,7 +58,7 @@ function UserPanel() {
             </h3>
           </div>
           <div className="card-body">
-            <LanguageSelector languages={languages} selectedLanguage={selectedLanguage} onLanguageChange={changeLang} />
+            <LanguageSelector selectedLanguage={selectedLanguage} onLanguageChange={changeLang} />
           </div>
           <div className="alert alert-info m-3">
             You will see real-time transcriptions of the admin's speech in your selected language below.
