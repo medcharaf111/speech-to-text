@@ -17,7 +17,7 @@ const AdminLogin = () => {
     // Simulate 1 second loading
     setTimeout(() => {
       // Check against static credentials
-      if (email === "admin@gmail.com" && password === "Test@123") {
+      if (email === import.meta.env.VITE_ADMIN_EMAIL && password === import.meta.env.VITE_ADMIN_PASSWORD) {
         // Set authenticated flag in localStorage
         localStorage.setItem("adminAuthenticated", "true");
         navigate("/speechToAdmin");
