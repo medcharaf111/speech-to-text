@@ -1,4 +1,6 @@
 import React from "react";
+import { MdGTranslate } from "react-icons/md";
+import { IoInformationCircleSharp } from "react-icons/io5";
 
 const LanguageSelector = ({
   languages,
@@ -7,12 +9,13 @@ const LanguageSelector = ({
 }) => {
   return (
     <div className="form-group">
-      <label htmlFor="languageSelect" className="form-label">
-        <strong>Select Your Preferred Language:</strong>
+      <label htmlFor="languageSelect" className="form-label fw-bold">
+        <MdGTranslate className="me-2" size={20} />
+        Select Your Preferred Language
       </label>
       <select
         id="languageSelect"
-        className="form-select"
+        className="form-select form-select-lg shadow-sm"
         value={selectedLanguage}
         onChange={(e) => onLanguageChange(e.target.value)}
       >
@@ -22,9 +25,10 @@ const LanguageSelector = ({
           </option>
         ))}
       </select>
-      <small className="form-text text-muted">
+      <div className="form-text mt-2">
+        <IoInformationCircleSharp className="me-1" size={18} />
         Transcriptions will be displayed in this language.
-      </small>
+      </div>
     </div>
   );
 };

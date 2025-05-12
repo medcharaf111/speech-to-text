@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { LiveAudioVisualizer } from "react-audio-visualize";
+import { AiFillAudio } from "react-icons/ai";
 import { io } from "socket.io-client";
 
 const wsUrl = import.meta.env.VITE_APP_API_URL;
@@ -58,37 +59,77 @@ function AdminPanel({ isRecording, setIsRecording }) {
   }
 
   return (
-    <div>
-      <select
-        value={selectedMic || ""}
-        onChange={(e) => setSelectedMic(e.target.value)}
-        disabled={isRecording}
-      >
-        {mics.map((m) => (
-          <option key={m.deviceId} value={m.deviceId}>
-            {m.label || m.deviceId}
-          </option>
-        ))}
-      </select>
+    <div className="card shadow-sm">
+      <div className="card-header bg-white py-3">
+        <h3 className="h5 mb-0 text-primary">
+          <i className="bi bi-mic-fill me-2"></i>
+          Speaker Controls
+        </h3>
+      </div>
+      <div className="card-body">
+        <div className="row g-3">
+          <div className="col-md-6">
+            <div className="form-group">
+              <label className="form-label">
+                <i className="bi bi-mic me-2"></i>
+                Select Microphone
+              </label>
+              <select
+                className="form-select"
+                value={selectedMic || ""}
+                onChange={(e) => setSelectedMic(e.target.value)}
+                disabled={isRecording}
+              >
+                {mics.map((m) => (
+                  <option key={m.deviceId} value={m.deviceId}>
+                    {m.label || m.deviceId}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+          <div className="col-md-6 d-flex align-items-end">
+            {!isRecording ? (
+              <button
+                className="btn btn-primary w-100 py-2 shadow-sm"
+                onClick={start}
+              >
+                <i className="bi bi-play-fill me-2"></i>
+                Start Speaking
+              </button>
+            ) : (
+              <button
+                className="btn btn-danger w-100 py-2 shadow-sm"
+                onClick={stop}
+              >
+                <i className="bi bi-stop-fill me-2"></i>
+                Stop Speaking
+              </button>
+            )}
+          </div>
+        </div>
 
-      {!isRecording ? (
-        <button onClick={start}>Start Speaking</button>
-      ) : (
-        <button onClick={stop}>Stop</button>
-      )}
-
-      {isRecording && recorderRef.current && (
-        <LiveAudioVisualizer
-          mediaRecorder={recorderRef.current}
-          width={600}
-          height={100}
-          barWidth={2}
-          gap={1}
-          backgroundColor="transparent"
-          barColor="#4caf50"
-          fftSize={1024}
-        />
-      )}
+        {isRecording && recorderRef.current && (
+          <div className="mt-4 p-3 bg-light rounded">
+            <h5 className="text-muted mb-3">
+              <AiFillAudio className="bi bi-graph-up me-2" />
+              Audio Visualization
+            </h5>
+            <div className="w-100 d-flex align-items-center justify-content-center">
+              <LiveAudioVisualizer
+                mediaRecorder={recorderRef.current}
+                width={600}
+                height={100}
+                barWidth={2}
+                gap={1}
+                backgroundColor="transparent"
+                barColor="#4caf50"
+                fftSize={1024}
+              />
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
