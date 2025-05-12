@@ -15,6 +15,7 @@ dotenv.config();
 const speechClient = new SpeechClient();
 const translateClient = new TranslationServiceClient();
 
+const currentAdminLanguage = "en-US";
 const RECORDING_CONFIG = {
   config: {
     encoding: "WEBM_OPUS",
@@ -22,20 +23,22 @@ const RECORDING_CONFIG = {
     languageCode: "en-US",
     interimResults: true,
   },
-  singleUtterance: false,
+  // singleUtterance: false,
 };
 
 const app = express();
-app.use(cors());
 const server = http.createServer(app);
 const io = socketIo(server, { cors: { origin: "*" } });
+
+app.use(cors());
+app.use(express.json());
 
 let adminSocket = null;
 const clients = new Map(); // socket -> { language: 'en-US' }
 let recognizeStream = null;
 
 io.on("connection", (socket) => {
-  socket.on("init:admin", ({ adminLanguage = "en-US" }) => {
+  socket.on("init:admin", ({ adminLanguage = currentAdminLanguage }) => {
     adminSocket = socket;
     socket.isAdmin = true;
     startRecognitionStream(adminLanguage);
@@ -85,39 +88,59 @@ function stopRecognitionStream() {
   recognizeStream = null;
 }
 
-async function onSpeechData(data) {
-  const result = data.results[0];
-  if (!result) return;
-  const text = result.alternatives[0].transcript;
-  const isFinal = result.isFinal;
-
-  // broadcast to each client in their chosen language
-  for (let [socket, { language }] of clients) {
-    let outText = text;
-
-    if (language !== RECORDING_CONFIG.config.languageCode) {
-      const [translation] = await translateClient.translateText({
-        parent: `projects/${process.env.GOOGLE_PROJECT_ID}/locations/global`,
-        contents: [text],
-        mimeType: "text/plain",
-        sourceLanguageCode: RECORDING_CONFIG.config.languageCode,
-        targetLanguageCode: language,
-      });
-      outText = translation.translations[0].translatedText;
-    }
-
-    socket.emit("transcript", { text: outText, isFinal });
+async function translateText(text, targetLanguage, sourceLanguage) {
+  if (targetLanguage === sourceLanguage) {
+    return text;
+  }
+  try {
+    const [translationResponse] = await translateClient.translateText({
+      parent: `projects/${process.env.GOOGLE_PROJECT_ID}/locations/global`,
+      contents: [text],
+      mimeType: "text/plain",
+      sourceLanguageCode: sourceLanguage,
+      targetLanguageCode: targetLanguage,
+    });
+    return translationResponse.translations[0].translatedText;
+  } catch (error) {
+    console.error(`Error translating text to ${targetLanguage}:`, error);
+    return text; // Return original text if translation fails
   }
 }
 
-const supportedLanguages = JSON.parse(
-  fs.readFileSync("./languages.json", "utf-8")
-);
+async function onSpeechData(data) {
+  if (!data.results || !data.results[0] || !data.results[0].alternatives[0]) {
+    return;
+  }
+  const result = data.results[0];
+  const text = result.alternatives[0].transcript;
+  const isFinal = result.isFinal;
+
+  try {
+    const translationPromises = [];
+    for (const [socket, { language: clientLanguage }] of clients) {
+      translationPromises.push(
+        translateText(text, clientLanguage, currentAdminLanguage)
+          .then((translatedText) => {
+            socket.emit("transcript", { text: translatedText, isFinal, language: clientLanguage });
+          })
+          .catch((error) => {
+            // This catch is for errors in emitting or post-processing
+            console.error(`Error processing or emitting transcript for client ${socket.id}:`, error);
+          })
+      );
+    }
+    await Promise.all(translationPromises);
+  } catch (error) {
+    // This catch is mainly for programming errors in the setup of Promise.all
+    console.error("Error during parallel translation processing:", error);
+  }
+}
+
+const supportedLanguages = JSON.parse(fs.readFileSync("./languages.json", "utf-8"));
 // API routes for List of supported languages
 app.get("/api/languages", (req, res) => {
   res.json(supportedLanguages);
 });
 
-server.listen(process.env.PORT, () =>
-  console.log("Server listening on port " + process.env.PORT)
-);
+const PORT = process.env.PORT || 3001; // Fallback port
+server.listen(PORT, () => console.log(`Server listening on port ${PORT}`));

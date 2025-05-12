@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import  { useState } from "react";
 import { MdEmail, MdError, MdLock } from "react-icons/md";
 import { useNavigate } from "react-router-dom";
 

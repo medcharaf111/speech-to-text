@@ -73,15 +73,10 @@ function UserPanel() {
             </h3>
           </div>
           <div className="card-body">
-            <LanguageSelector
-              languages={languages}
-              selectedLanguage={selectedLanguage}
-              onLanguageChange={changeLang}
-            />
+            <LanguageSelector languages={languages} selectedLanguage={selectedLanguage} onLanguageChange={changeLang} />
           </div>
           <div className="alert alert-info m-3">
-            You will see real-time transcriptions of the admin's speech in your
-            selected language below.
+            You will see real-time transcriptions of the admin's speech in your selected language below.
           </div>
         </div>
       </div>
@@ -107,14 +102,8 @@ function UserPanel() {
               }}
             >
               {!lines ? (
-                <div
-                  className="text-center text-muted"
-                  style={{ paddingTop: "5.5rem", paddingBottom: "5.5rem" }}
-                >
-                  <p>
-                    No transcriptions yet. They will appear here when the admin
-                    starts speaking.
-                  </p>
+                <div className="text-center text-muted" style={{ paddingTop: "5.5rem", paddingBottom: "5.5rem" }}>
+                  <p>No transcriptions yet. They will appear here when the admin starts speaking.</p>
                 </div>
               ) : (
                 <div className="transcript-text">

@@ -15,11 +15,19 @@ function AdminPanel({ isRecording, setIsRecording }) {
 
   // enumerate mics
   useEffect(() => {
-    navigator.mediaDevices.enumerateDevices().then((devs) => {
-      const inputs = devs.filter((d) => d.kind === "audioinput");
-      setMics(inputs);
-      if (inputs[0]) setSelectedMic(inputs[0].deviceId);
-    });
+    async function fetchMics() {
+      try {
+        await navigator.mediaDevices.getUserMedia({ audio: true }); //prompt for mic access so labels populate
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const audioInputs = devices.filter((d) => d.kind === "audioinput");
+        setMics(audioInputs);
+        if (audioInputs[0]) setSelectedMic(audioInputs[0].deviceId);
+      } catch (err) {
+        console.error("Error fetching mics:", err);
+      }
+    }
+
+    fetchMics();
   }, []);
 
   // connect socket.io
@@ -32,23 +40,21 @@ function AdminPanel({ isRecording, setIsRecording }) {
   }, [wsUrl]);
 
   function start() {
-    navigator.mediaDevices
-      .getUserMedia({ audio: { deviceId: selectedMic } })
-      .then((stream) => {
-        mediaRef.current = stream;
-        const recorder = new MediaRecorder(stream, {
-          mimeType: "audio/webm;codecs=opus",
-        });
-
-        recorder.ondataavailable = (e) => {
-          if (socketRef.current.connected) {
-            socketRef.current.emit("audio", e.data);
-          }
-        };
-        recorder.start(250);
-        recorderRef.current = recorder;
-        setIsRecording(true);
+    navigator.mediaDevices.getUserMedia({ audio: { deviceId: selectedMic } }).then((stream) => {
+      mediaRef.current = stream;
+      const recorder = new MediaRecorder(stream, {
+        mimeType: "audio/webm;codecs=opus",
       });
+
+      recorder.ondataavailable = (e) => {
+        if (socketRef.current.connected) {
+          socketRef.current.emit("audio", e.data);
+        }
+      };
+      recorder.start(250);
+      recorderRef.current = recorder;
+      setIsRecording(true);
+    });
   }
 
   function stop() {
@@ -90,18 +96,12 @@ function AdminPanel({ isRecording, setIsRecording }) {
           </div>
           <div className="col-md-6 d-flex align-items-end">
             {!isRecording ? (
-              <button
-                className="btn btn-primary w-100 py-2 shadow-sm"
-                onClick={start}
-              >
+              <button className="btn btn-primary w-100 py-2 shadow-sm" onClick={start}>
                 <i className="bi bi-play-fill me-2"></i>
                 Start Speaking
               </button>
             ) : (
-              <button
-                className="btn btn-danger w-100 py-2 shadow-sm"
-                onClick={stop}
-              >
+              <button className="btn btn-danger w-100 py-2 shadow-sm" onClick={stop}>
                 <i className="bi bi-stop-fill me-2"></i>
                 Stop Speaking
               </button>
