@@ -36,8 +36,6 @@ let recognizeStream = null;
 
 io.on("connection", (socket) => {
   socket.on("init:admin", ({ adminLanguage = "en-US" }) => {
-    console.log("adminLanguage", adminLanguage);
-
     adminSocket = socket;
     socket.isAdmin = true;
     startRecognitionStream(adminLanguage);
