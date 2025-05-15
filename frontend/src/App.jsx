@@ -1,12 +1,5 @@
-import React, { useState } from "react";
-import {
-  BrowserRouter,
-  Routes,
-  Route,
-  Link,
-  Navigate,
-  useLocation,
-} from "react-router-dom";
+import { useState } from "react";
+import { BrowserRouter, Routes, Route, Link, Navigate, useLocation } from "react-router-dom";
 import AdminPanel from "./components/AdminPanel";
 import UserPanel from "./components/UserPanel";
 import AdminLogin from "./components/AdminLogin";
@@ -54,10 +47,7 @@ const AppContent = () => {
                 path="/speechToAdmin"
                 element={
                   <AuthGuard>
-                    <AdminPanel
-                      isRecording={isRecording}
-                      setIsRecording={setIsRecording}
-                    />
+                    <AdminPanel isRecording={isRecording} setIsRecording={setIsRecording} />
                   </AuthGuard>
                 }
               />
