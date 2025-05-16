@@ -1,8 +1,9 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState } from "react";
 import { io } from "socket.io-client";
 import LanguageSelector from "./LanguageSelector";
 import { BsInfoCircleFill } from "react-icons/bs";
 import { BsChatTextFill } from "react-icons/bs";
+import Transcription from "./Transcription";
 
 const wsUrl = import.meta.env.VITE_APP_API_URL;
 
@@ -10,7 +11,6 @@ function UserPanel() {
   const [socket, setSocket] = useState(null);
   const [lines, setLines] = useState("");
   const [selectedLanguage, setSelectedLanguage] = useState("en-US");
-  const transcriptRef = useRef(null);
 
   useEffect(() => {
     const sock = io(wsUrl);
@@ -32,20 +32,13 @@ function UserPanel() {
     return () => sock.disconnect();
   }, []);
 
-  // Auto scroll to bottom when new content arrives
-  useEffect(() => {
-    if (transcriptRef.current) {
-      transcriptRef.current.scrollTop = transcriptRef.current.scrollHeight;
-    }
-  }, [lines]);
-
-  function changeLang(lang) {
+  const changeLang = (lang) => {
     setSelectedLanguage(lang);
     if (socket) {
       socket.emit("setLanguage", lang);
       setLines(""); // clear old transcript
     }
-  }
+  };
 
   return (
     <div className="row g-4 h-100">
@@ -77,34 +70,7 @@ function UserPanel() {
             </div>
           </div>
           <div className="card-body p-0">
-            <div
-              ref={transcriptRef}
-              className="transcript-container p-4 bg-light"
-              style={{
-                height: "calc(100vh - 250px)",
-                overflowY: "auto",
-                lineHeight: "1.6",
-              }}
-            >
-              {!lines ? (
-                <div className="text-center text-muted" style={{ paddingTop: "5.5rem", paddingBottom: "5.5rem" }}>
-                  <p>No transcriptions yet. They will appear here when the admin starts speaking.</p>
-                </div>
-              ) : (
-                <div className="transcript-text">
-                  {lines.split(". ").map((sentence, index, array) => (
-                    <p key={index}>
-                      {sentence.trim() && (
-                        <p className="mb-3">
-                          {sentence.trim()}
-                          {index < array.length - 1 ? "." : ""}
-                        </p>
-                      )}
-                    </p>
-                  ))}
-                </div>
-              )}
-            </div>
+            <Transcription lines={lines} />
           </div>
         </div>
       </div>

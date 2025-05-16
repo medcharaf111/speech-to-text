@@ -2,7 +2,9 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { LiveAudioVisualizer } from "react-audio-visualize";
 import { AiFillAudio } from "react-icons/ai";
 import { io } from "socket.io-client";
+import Select from "react-select";
 import LanguageSelector from "./LanguageSelector";
+import AdminTranscription from "./AdminTranscription";
 
 const WS_URL = import.meta.env.VITE_APP_API_URL;
 const AUDIO_MIME_TYPE = "audio/webm"; // Consider "audio/webm;codecs=opus" for better quality/compression if supported
@@ -173,99 +175,102 @@ function AdminPanel({ isRecording, setIsRecording }) {
   }, [isRecording, stopRecording]);
 
   return (
-    <div className="card shadow-sm mb-4">
-      <div className="card-header bg-white py-3 d-flex justify-content-between align-items-center">
-        <h3 className="h5 mb-0 text-primary d-inline-flex align-items-center">
-          <i className="bi bi-mic-fill me-2"></i>
-          Speaker Controls
-        </h3>
-        <span className={`badge ${isConnected ? "bg-success" : "bg-danger"}`}>
-          {isConnected ? "Connected" : "Disconnected"}
-        </span>
-      </div>
-      <div className="card-body">
-        {error && (
-          <div className="alert alert-danger" role="alert">
-            <i className="bi bi-exclamation-triangle-fill me-2"></i>
-            {error}
-          </div>
-        )}
-        <div className="row g-3 mb-3">
-          <div className="col-md-4">
-            <div className="form-group">
-              <label htmlFor="micSelect" className="form-label fw-bold">
-                <i className="bi bi-mic me-2"></i>
-                Select Microphone
-              </label>
-              <select
-                id="micSelect"
-                className="form-select form-select-lg shadow-sm"
-                value={selectedMic || ""}
-                onChange={(e) => setSelectedMic(e.target.value)}
-                disabled={isRecording || mics.length === 0}
-                aria-label="Select Microphone"
-              >
-                {mics.length === 0 && <option value="">No microphones found</option>}
-                {mics.map((mic) => (
-                  <option key={mic.deviceId} value={mic.deviceId}>
-                    {mic.label || `Microphone ${mic.deviceId?.substring(0, 6)}...`}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
-          <div className="col-md-4">
-            <LanguageSelector
-              selectedLanguage={selectedAdminLanguage}
-              onLanguageChange={(lang) => setSelectedAdminLanguage(lang)}
-              isAdmin
-            />
-          </div>
-          <div className="col-md-4 d-flex align-items-end">
-            {!isRecording ? (
-              <button
-                className="btn btn-primary w-100 py-2 shadow-sm"
-                onClick={startRecording}
-                disabled={!selectedMic || !isConnected}
-              >
-                <i className="bi bi-play-fill me-2"></i>
-                Start Speaking
-              </button>
-            ) : (
-              <button className="btn btn-danger w-100 py-2 shadow-sm" onClick={() => stopRecording()}>
-                <i className="bi bi-stop-fill me-2"></i>
-                Stop Speaking
-              </button>
-            )}
-          </div>
+    <div>
+      <div className="card shadow-sm mb-4">
+        <div className="card-header bg-white py-3 d-flex justify-content-between align-items-center">
+          <h3 className="h5 mb-0 text-primary d-inline-flex align-items-center">
+            <i className="bi bi-mic-fill me-2"></i>
+            Speaker Controls
+          </h3>
+          <span className={`badge ${isConnected ? "bg-success" : "bg-danger"}`}>
+            {isConnected ? "Connected" : "Disconnected"}
+          </span>
         </div>
-
-        {isRecording && mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive" && (
-          <div className="mt-4 p-3 bg-light rounded border">
-            <h5 className="text-muted mb-3 d-inline-flex align-items-center">
-              <AiFillAudio className="me-2 text-success" />
-              Live Audio Feed
-            </h5>
-            <div className="w-100 d-flex align-items-center justify-content-center">
-              {mediaRecorderRef.current && (
-                <LiveAudioVisualizer
-                  mediaRecorder={mediaRecorderRef.current}
-                  width="100%"
-                  height={75}
-                  barWidth={3}
-                  gap={2}
-                  backgroundColor="transparent"
-                  barColor="#28a745"
-                  fftSize={512}
-                  maxDecibels={-10}
-                  minDecibels={-80}
-                  smoothingTimeConstant={0.4}
+        <div className="card-body">
+          {error && (
+            <div className="alert alert-danger" role="alert">
+              <i className="bi bi-exclamation-triangle-fill me-2"></i>
+              {error}
+            </div>
+          )}
+          <div className="row g-3 mb-3">
+            <div className="col-md-4">
+              <div className="form-group">
+                <label className="form-label fw-bold">
+                  <i className="bi bi-mic me-2"></i>
+                  Select Microphone
+                </label>
+                <Select
+                  className="form-select-lg"
+                  value={mics.find((item) => item.deviceId == selectedMic) || ""}
+                  onChange={(e) => setSelectedMic(e.value)}
+                  disabled={isRecording || mics.length === 0}
+                  isSearchable
+                  options={
+                    mics.length === 0
+                      ? [{ label: "No microphones found", value: "" }]
+                      : mics.map((mic) => ({
+                          label: mic.label || `Microphone ${mic.deviceId?.substring(0, 6)}...`,
+                          value: mic.deviceId,
+                        }))
+                  }
                 />
+              </div>
+            </div>
+            <div className="col-md-4">
+              <LanguageSelector
+                selectedLanguage={selectedAdminLanguage}
+                onLanguageChange={(lang) => setSelectedAdminLanguage(lang)}
+                isAdmin
+              />
+            </div>
+            <div className="col-md-4 d-flex align-items-end">
+              {!isRecording ? (
+                <button
+                  className="btn btn-primary w-100 py-2 mb-2 shadow-sm"
+                  onClick={startRecording}
+                  disabled={!selectedMic || !isConnected}
+                >
+                  <i className="bi bi-play-fill me-2"></i>
+                  Start Speaking
+                </button>
+              ) : (
+                <button className="btn btn-danger w-100 py-2 mb-2 shadow-sm" onClick={() => stopRecording()}>
+                  <i className="bi bi-stop-fill me-2"></i>
+                  Stop Speaking
+                </button>
               )}
             </div>
           </div>
-        )}
+
+          {isRecording && mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive" && (
+            <div className="mt-4 p-3 bg-light rounded border">
+              <h5 className="text-muted mb-3 d-inline-flex align-items-center">
+                <AiFillAudio className="me-2 text-success" />
+                Live Audio Feed
+              </h5>
+              <div className="w-100 d-flex align-items-center justify-content-center">
+                {mediaRecorderRef.current && (
+                  <LiveAudioVisualizer
+                    mediaRecorder={mediaRecorderRef.current}
+                    width="100%"
+                    height={75}
+                    barWidth={3}
+                    gap={2}
+                    backgroundColor="transparent"
+                    barColor="#28a745"
+                    fftSize={512}
+                    maxDecibels={-10}
+                    minDecibels={-80}
+                    smoothingTimeConstant={0.4}
+                  />
+                )}
+              </div>
+            </div>
+          )}
+        </div>
       </div>
+      {socketRef.current && <AdminTranscription socketRef={socketRef} />}
     </div>
   );
 }

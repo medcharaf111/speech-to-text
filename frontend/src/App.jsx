@@ -5,12 +5,14 @@ import UserPanel from "./components/UserPanel";
 import AdminLogin from "./components/AdminLogin";
 import AuthGuard from "./components/AuthGuard";
 import { BsMicFill } from "react-icons/bs";
+import { IoMdLogOut } from "react-icons/io";
 
 // Create a wrapper component to use useLocation
 const AppContent = () => {
   const [isRecording, setIsRecording] = useState(false);
   const location = useLocation();
   const isAdminLoginRoute = location.pathname === "/admin-login";
+  const isAuthenticated = localStorage.getItem("adminAuthenticated") === "true";
 
   return (
     <div className="bg-light min-vh-100">
@@ -24,14 +26,23 @@ const AppContent = () => {
                   Real-time Speech-to-Text
                 </h1>
                 <div className="d-flex gap-2">
-                  {/* <Link to="/" className="btn btn-outline-success">
-                  <BsHeadphones className="me-1" />
-                  Listener
-                </Link> */}
-                  <Link to="/admin-login" className="btn btn-outline-primary">
-                    <BsMicFill className="me-1" />
-                    Speaker
-                  </Link>
+                  {isAuthenticated ? (
+                    <button
+                      className="btn btn-outline-primary"
+                      onClick={() => {
+                        localStorage.removeItem("adminAuthenticated");
+                        window.location.reload();
+                      }}
+                    >
+                      <IoMdLogOut className="me-1" />
+                      Logout
+                    </button>
+                  ) : (
+                    <Link to="/admin-login" className="btn btn-outline-primary">
+                      <BsMicFill className="me-1" />
+                      Speaker
+                    </Link>
+                  )}
                 </div>
               </div>
             </div>

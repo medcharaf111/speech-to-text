@@ -1,4 +1,4 @@
-import  { useState } from "react";
+import { useEffect, useState } from "react";
 import { MdEmail, MdError, MdLock } from "react-icons/md";
 import { useNavigate } from "react-router-dom";
 
@@ -8,6 +8,13 @@ const AdminLogin = () => {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
+
+  useEffect(() => {
+    const isAuthenticated = localStorage.getItem("adminAuthenticated") === "true";
+    if (isAuthenticated) {
+      navigate("/speechToAdmin");
+    }
+  }, []);
 
   const handleLogin = (e) => {
     e.preventDefault();
@@ -29,30 +36,18 @@ const AdminLogin = () => {
   };
 
   return (
-    <div
-      className="d-flex align-items-center  justify-content-center "
-      style={{ height: "calc(100vh - 48px)" }}
-    >
-      <div
-        className="card shadow w-100"
-        style={{ maxWidth: "450px", borderRadius: "15px", border: "none" }}
-      >
+    <div className="d-flex align-items-center  justify-content-center " style={{ height: "calc(100vh - 48px)" }}>
+      <div className="card shadow w-100" style={{ maxWidth: "450px", borderRadius: "15px", border: "none" }}>
         <div className="card-body p-4 p-md-5">
           <div className="text-center mb-4">
-            <h1
-              className="fw-bold text-primary mb-2"
-              style={{ fontSize: "1.75rem" }}
-            >
+            <h1 className="fw-bold text-primary mb-2" style={{ fontSize: "1.75rem" }}>
               Admin Portal
             </h1>
             <p className="text-muted">Enter Admin credentials to continue</p>
           </div>
 
           {error && (
-            <div
-              className="alert alert-danger d-flex align-items-center"
-              role="alert"
-            >
+            <div className="alert alert-danger d-flex align-items-center" role="alert">
               <MdError />
               {error}
             </div>
@@ -117,11 +112,7 @@ const AdminLogin = () => {
             >
               {loading ? (
                 <>
-                  <span
-                    className="spinner-border spinner-border-sm me-2"
-                    role="status"
-                    aria-hidden="true"
-                  ></span>
+                  <span className="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>
                   Signing in...
                 </>
               ) : (
