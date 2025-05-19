@@ -90,8 +90,9 @@ function startRecognitionStream(adminLang) {
   //   .on("error", (e) => console.log(e));
   recognizeStream = speechClient.listen.live({
     model: adminLang == "en-US" ? "nova-3" : "nova-2",
-    language: adminLang,
+    language: adminLang, //adminLang == "en-US" ? "multi" : adminLang,
     smart_format: true,
+    // endpointing: 100,
   });
   recognizeStream.addListener(LiveTranscriptionEvents.Open, () => {
     recognizeStream.addListener(LiveTranscriptionEvents.Transcript, (data) => {

@@ -12,6 +12,7 @@ const AppContent = () => {
   const [isRecording, setIsRecording] = useState(false);
   const location = useLocation();
   const isAdminLoginRoute = location.pathname === "/admin-login";
+  const isDashboardRoute = location.pathname === "/";
   const isAuthenticated = localStorage.getItem("adminAuthenticated") === "true";
 
   return (
@@ -26,7 +27,7 @@ const AppContent = () => {
                   Real-time Speech-to-Text
                 </h1>
                 <div className="d-flex gap-2">
-                  {isAuthenticated ? (
+                  {isAuthenticated && !isDashboardRoute ? (
                     <button
                       className="btn btn-outline-primary"
                       onClick={() => {

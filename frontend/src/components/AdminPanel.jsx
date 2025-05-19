@@ -11,6 +11,16 @@ const AUDIO_MIME_TYPE = "audio/webm"; // Consider "audio/webm;codecs=opus" for b
 const RECORDER_TIMESLICE_MS = 250; // Send audio data every 250ms
 const START_RECORDING_DELAY_MS = 1000; // Delay before starting media stream to allow server setup
 
+// 1. Define the MIME types you’d like to try, in order:
+const MIME_TYPES = [
+  "audio/webm;codecs=opus", // best for Chrome/Firefox
+  "audio/webm", // simpler WebM fallback
+  "audio/mp4;codecs=mp4a.40.2", // Safari’s preferred AAC-in-MP4
+  "audio/mp4", // plain MP4 fallback
+];
+
+const supportedMimeType = MIME_TYPES.find((t) => MediaRecorder.isTypeSupported(t));
+
 const delay = (delayInms) => new Promise((resolve) => setTimeout(resolve, delayInms));
 
 function AdminPanel({ isRecording, setIsRecording }) {
@@ -121,10 +131,12 @@ function AdminPanel({ isRecording, setIsRecording }) {
       socketRef.current.emit("start:admin", { adminLanguage: selectedAdminLanguage });
       await delay(START_RECORDING_DELAY_MS);
 
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: { deviceId: selectedMic } });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { deviceId: selectedMic, noiseSuppression: true, echoCancellation: true },
+      });
       mediaStreamRef.current = stream;
 
-      const recorder = new MediaRecorder(stream, { mimeType: AUDIO_MIME_TYPE });
+      const recorder = new MediaRecorder(stream, { mimeType: supportedMimeType });
       mediaRecorderRef.current = recorder;
 
       recorder.ondataavailable = (event) => {
