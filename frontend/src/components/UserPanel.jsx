@@ -4,22 +4,27 @@ import LanguageSelector from "./LanguageSelector";
 import { BsInfoCircleFill } from "react-icons/bs";
 import { BsChatTextFill } from "react-icons/bs";
 import Transcription from "./Transcription";
+import ListenSpeech from "./ListenSpeech";
+import { useRef } from "react";
 
 const wsUrl = import.meta.env.VITE_APP_API_URL;
 
 function UserPanel() {
-  const [socket, setSocket] = useState(null);
+  const socketRef = useRef(null);
   const [lines, setLines] = useState("");
   const [selectedLanguage, setSelectedLanguage] = useState("en-US");
 
   useEffect(() => {
-    const sock = io(wsUrl);
-    sock.on("connect", () => {
-      sock.emit("init:client", { selectedLanguage });
+    socketRef.current = io(wsUrl);
+
+    socketRef.current.on("connect", () => {
+      socketRef.current.emit("init:client", { selectedLanguage });
     });
 
-    sock.on("transcript", ({ text, isFinal }) => {
+    socketRef.current.on("transcript", ({ text, isFinal }) => {
       if (isFinal) {
+        socketRef.current.emit("tts_send_text", text);
+
         setLines((prev) => {
           const cleanedPrev = prev.trim().replace(/,\s*$/, "");
           return cleanedPrev ? `${cleanedPrev}, ${text}` : text;
@@ -27,15 +32,17 @@ function UserPanel() {
       }
     });
 
-    setSocket(sock);
-
-    return () => sock.disconnect();
+    return () => {
+      if (socketRef.current) {
+        socketRef.current.disconnect();
+      }
+    };
   }, []);
 
   const changeLang = (lang) => {
     setSelectedLanguage(lang);
-    if (socket) {
-      socket.emit("setLanguage", lang);
+    if (socketRef.current) {
+      socketRef.current.emit("setLanguage", lang);
       setLines(""); // clear old transcript
     }
   };
@@ -52,6 +59,7 @@ function UserPanel() {
           </div>
           <div className="card-body">
             <LanguageSelector selectedLanguage={selectedLanguage} onLanguageChange={changeLang} />
+            <ListenSpeech socketRef={socketRef.current} />
           </div>
           <div className="alert alert-info m-3">
             You will see real-time transcriptions of the admin's speech in your selected language below.

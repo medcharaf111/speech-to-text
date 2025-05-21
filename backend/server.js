@@ -3,12 +3,12 @@ require("dotenv").config(); // Load environment variables from .env file
 const fs = require("fs");
 const http = require("http");
 const socketIo = require("socket.io");
-const { createClient, LiveTranscriptionEvents } = require("@deepgram/sdk");
+const { createClient, LiveTranscriptionEvents, LiveTTSEvents } = require("@deepgram/sdk");
 const { TranslationServiceClient } = require("@google-cloud/translate").v3;
 const cors = require("cors");
 const express = require("express");
 
-const speechClient = createClient(process.env.DEEPGRAM_API_KEY);
+const deepgram = createClient(process.env.DEEPGRAM_API_KEY);
 const translateClient = new TranslationServiceClient();
 
 const app = express();
@@ -23,6 +23,8 @@ const clients = new Map(); // socket -> { language: '' }
 let recognizeStream = null;
 
 io.on("connection", (socket) => {
+  let dgConnection; // Deepgram live connection
+
   socket.on("init:admin", () => {
     adminSocket = socket;
     socket.isAdmin = true;
@@ -30,6 +32,7 @@ io.on("connection", (socket) => {
 
   socket.on("init:client", ({ language = "en-US" }) => {
     clients.set(socket, { language });
+    dgConnection = initSpeakingStream(socket, dgConnection);
   });
 
   socket.on("setLanguage", (language) => {
@@ -56,18 +59,38 @@ io.on("connection", (socket) => {
     }
   });
 
+  socket.on("tts_send_text", (text) => {
+    if (dgConnection) {
+      dgConnection.sendText(text); // Send text
+      dgConnection.flush();
+    }
+  });
+
+  socket.on("stop_tts_stream", () => {
+    console.log("Received stop_tts_stream from client.");
+    if (dgConnection && dgConnection.getReadyState() === WebSocket.OPEN) {
+      dgConnection.flush(); // Flush any remaining text
+      dgConnection.requestClose(); // Close Deepgram connection
+      console.log("Deepgram TTS connection explicitly finished.");
+    }
+  });
+
   socket.on("disconnect", () => {
     if (socket === adminSocket) {
       stopRecognitionStream();
       adminSocket = null;
     } else {
       clients.delete(socket);
+
+      if (!dgConnection) return;
+      dgConnection.requestClose();
+      dgConnection = null;
     }
   });
 });
 
 function startRecognitionStream(adminLang) {
-  recognizeStream = speechClient.listen.live({
+  recognizeStream = deepgram.listen.live({
     model: adminLang == "en-US" ? "nova-3" : "nova-2",
     language: adminLang, //adminLang == "en-US" ? "multi" : adminLang,
     smart_format: true,
@@ -75,35 +98,65 @@ function startRecognitionStream(adminLang) {
     // utterance_end_ms: 3000,
     // endpointing: 100,
   });
-  recognizeStream.addListener(LiveTranscriptionEvents.Open, () => {
-    recognizeStream.addListener(LiveTranscriptionEvents.Transcript, (data) => {
+  recognizeStream.on(LiveTranscriptionEvents.Open, () => {
+    recognizeStream.on(LiveTranscriptionEvents.Transcript, (data) => {
       const transcript = data.channel?.alternatives?.[0]?.transcript;
       if (transcript) {
         onSpeechData(
           {
-            results: [
-              {
-                alternatives: [
-                  {
-                    transcript,
-                  },
-                ],
-                isFinal: true,
-              },
-            ],
+            transcript,
+            isFinal: true,
           },
           adminLang
         );
       }
     });
-    recognizeStream.addListener(LiveTranscriptionEvents.Close, () => {
+    recognizeStream.on(LiveTranscriptionEvents.Close, () => {
       console.log("Deepgram connection closed.");
     });
-    recognizeStream.addListener(LiveTranscriptionEvents.Error, (error) => {
+    recognizeStream.on(LiveTranscriptionEvents.Error, (error) => {
       console.log("Deepgram error:", error);
       stopRecognitionStream(); // Stop on error
     });
   });
+}
+
+function initSpeakingStream(socket, dgConnection) {
+  if (dgConnection && dgConnection.getReadyState() === WebSocket.OPEN) {
+    console.log("Existing Deepgram connection, flushing and sending new text.");
+    dgConnection.flush();
+    return;
+  }
+
+  try {
+    const dgConn = deepgram.speak.live({
+      model: "aura-2-thalia-en", // Choose your desired Deepgram voice model
+      encoding: "linear16", // Recommended for real-time streaming
+      sample_rate: 48000, // Sample rate should match what your client expects
+    });
+
+    dgConn.on(LiveTTSEvents.Open, () => {
+      // console.log("Deepgram TTS connection opened.");
+
+      dgConn.on(LiveTTSEvents.Audio, (audioChunk) => {
+        // console.log("Received audio chunk from Deepgram, sending to client.");
+        socket.emit("tts_audio_chunk", audioChunk); // Emit audio data to the client
+      });
+
+      dgConn.on(LiveTTSEvents.Close, () => {
+        // console.log("Deepgram TTS connection closed.");
+      });
+
+      dgConn.on(LiveTTSEvents.Error, (error) => {
+        console.log("Deepgram TTS error:", error);
+        socket.emit("tts_error", "Deepgram TTS error occurred.");
+      });
+    });
+    return dgConn;
+  } catch (error) {
+    console.error("Error starting Deepgram TTS connection:", error);
+    socket.emit("tts_error", "Failed to start TTS connection.");
+  }
 }
 
 function stopRecognitionStream() {
@@ -133,12 +186,11 @@ async function translateText(text, targetLanguage, sourceLanguage) {
 }
 
 async function onSpeechData(data, adminLang) {
-  if (!data.results || !data.results[0] || !data.results[0].alternatives[0]) {
+  if (!data.transcript) {
     return;
   }
-  const result = data.results[0];
-  const text = result.alternatives[0].transcript;
-  const isFinal = result.isFinal;
+  const text = data.transcript;
+  const isFinal = data.isFinal;
 
   try {
     const translationPromises = [];
