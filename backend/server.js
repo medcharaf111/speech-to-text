@@ -1,30 +1,15 @@
 // server.js
+require("dotenv").config(); // Load environment variables from .env file
 const fs = require("fs");
 const http = require("http");
 const socketIo = require("socket.io");
-// const { SpeechClient } = require("@google-cloud/speech");
 const { createClient, LiveTranscriptionEvents } = require("@deepgram/sdk");
 const { TranslationServiceClient } = require("@google-cloud/translate").v3;
 const cors = require("cors");
 const express = require("express");
-const dotenv = require("dotenv");
 
-// Load environment variables
-dotenv.config();
-
-// GCP clients (requires GOOGLE_APPLICATION_CREDENTIALS env var)
-// const speechClient = new SpeechClient();
 const speechClient = createClient(process.env.DEEPGRAM_API_KEY);
 const translateClient = new TranslationServiceClient();
-
-// const RECORDING_CONFIG = {
-//   config: {
-//     encoding: "WEBM_OPUS",
-//     sampleRateHertz: 48000,
-//     interimResults: true,
-//   },
-//   // singleUtterance: false,
-// };
 
 const app = express();
 const server = http.createServer(app);
@@ -67,7 +52,6 @@ io.on("connection", (socket) => {
 
   socket.on("audio", (audioChunk) => {
     if (socket === adminSocket && recognizeStream) {
-      // recognizeStream.write(audioChunk);
       recognizeStream.send(audioChunk);
     }
   });
@@ -83,15 +67,12 @@ io.on("connection", (socket) => {
 });
 
 function startRecognitionStream(adminLang) {
-  // RECORDING_CONFIG.config.languageCode = adminLang;
-  // recognizeStream = speechClient
-  //   .streamingRecognize(RECORDING_CONFIG)
-  //   .on("data", onSpeechData)
-  //   .on("error", (e) => console.log(e));
   recognizeStream = speechClient.listen.live({
     model: adminLang == "en-US" ? "nova-3" : "nova-2",
     language: adminLang, //adminLang == "en-US" ? "multi" : adminLang,
     smart_format: true,
+    // filler_words: true,
+    // utterance_end_ms: 3000,
     // endpointing: 100,
   });
   recognizeStream.addListener(LiveTranscriptionEvents.Open, () => {
