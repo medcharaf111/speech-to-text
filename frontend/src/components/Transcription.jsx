@@ -26,15 +26,8 @@ function Transcription({ lines }) {
         </div>
       ) : (
         <div className="transcript-text">
-          {lines.split(". ").map((sentence, index, array) => (
-            <p key={index}>
-              {sentence.trim() && (
-                <p className="mb-3">
-                  {sentence.trim()}
-                  {index < array.length - 1 ? "." : ""}
-                </p>
-              )}
-            </p>
+          {lines.split(". ").map((sentence, index) => (
+            <p key={index}>{sentence.trim()}</p>
           ))}
         </div>
       )}

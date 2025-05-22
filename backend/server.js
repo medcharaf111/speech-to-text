@@ -1,5 +1,5 @@
-// server.js
 require("dotenv").config(); // Load environment variables from .env file
+
 const fs = require("fs");
 const http = require("http");
 const socketIo = require("socket.io");
@@ -30,14 +30,20 @@ io.on("connection", (socket) => {
     socket.isAdmin = true;
   });
 
-  socket.on("init:client", ({ language = "en-US" }) => {
+  socket.on("init:client", ({ language = "en-US", voiceModel }) => {
     clients.set(socket, { language });
-    dgConnection = initSpeakingStream(socket, dgConnection);
+    dgConnection = initSpeakingStream(socket, dgConnection, voiceModel);
   });
 
   socket.on("setLanguage", (language) => {
     if (clients.has(socket)) {
       clients.get(socket).language = language;
+    }
+  });
+
+  socket.on("setVoiceModel", (voiceModel) => {
+    if (clients.has(socket)) {
+      dgConnection = initSpeakingStream(socket, dgConnection, voiceModel);
     }
   });
 
@@ -71,6 +77,7 @@ io.on("connection", (socket) => {
     if (dgConnection && dgConnection.getReadyState() === WebSocket.OPEN) {
       dgConnection.flush(); // Flush any remaining text
       dgConnection.requestClose(); // Close Deepgram connection
+      dgConnection = null;
       console.log("Deepgram TTS connection explicitly finished.");
     }
   });
@@ -121,7 +128,7 @@ function startRecognitionStream(adminLang) {
   });
 }
 
-function initSpeakingStream(socket, dgConnection) {
+function initSpeakingStream(socket, dgConnection, voiceModel) {
   if (dgConnection && dgConnection.getReadyState() === WebSocket.OPEN) {
     console.log("Existing Deepgram connection, flushing and sending new text.");
     dgConnection.flush();
@@ -130,21 +137,18 @@ function initSpeakingStream(socket, dgConnection) {
 
   try {
     const dgConn = deepgram.speak.live({
-      model: "aura-2-thalia-en", // Choose your desired Deepgram voice model
+      model: voiceModel, // Choose your desired Deepgram voice model
       encoding: "linear16", // Recommended for real-time streaming
       sample_rate: 48000, // Sample rate should match what your client expects
     });
 
     dgConn.on(LiveTTSEvents.Open, () => {
-      // console.log("Deepgram TTS connection opened.");
-
       dgConn.on(LiveTTSEvents.Audio, (audioChunk) => {
-        // console.log("Received audio chunk from Deepgram, sending to client.");
         socket.emit("tts_audio_chunk", audioChunk); // Emit audio data to the client
       });
 
       dgConn.on(LiveTTSEvents.Close, () => {
-        // console.log("Deepgram TTS connection closed.");
+        console.log("Deepgram TTS connection closed.");
       });
 
       dgConn.on(LiveTTSEvents.Error, (error) => {

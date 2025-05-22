@@ -7,7 +7,7 @@ function AdminTranscription({ socketRef }) {
   const [lines, setLines] = useState("");
 
   useEffect(() => {
-    socketRef.current.emit("init:client", { selectedLanguage });
+    socketRef.current.emit("init:client", { selectedLanguage, voiceModel: "aura-2-apollo-en" });
 
     socketRef.current.on("transcript", ({ text, isFinal }) => {
       if (isFinal) {

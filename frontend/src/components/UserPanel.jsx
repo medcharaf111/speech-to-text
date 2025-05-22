@@ -6,6 +6,7 @@ import { BsChatTextFill } from "react-icons/bs";
 import Transcription from "./Transcription";
 import ListenSpeech from "./ListenSpeech";
 import { useRef } from "react";
+import VoiceModelSelector from "./VoiceModelSelector";
 
 const wsUrl = import.meta.env.VITE_APP_API_URL;
 
@@ -13,12 +14,13 @@ function UserPanel() {
   const socketRef = useRef(null);
   const [lines, setLines] = useState("");
   const [selectedLanguage, setSelectedLanguage] = useState("en-US");
+  const [selectedVoiceModel, setSelectedVoiceModel] = useState("aura-2-apollo-en");
 
   useEffect(() => {
     socketRef.current = io(wsUrl);
 
     socketRef.current.on("connect", () => {
-      socketRef.current.emit("init:client", { selectedLanguage });
+      socketRef.current.emit("init:client", { selectedLanguage, voiceModel: selectedVoiceModel });
     });
 
     socketRef.current.on("transcript", ({ text, isFinal }) => {
@@ -47,6 +49,14 @@ function UserPanel() {
     }
   };
 
+  const changeVoiceModel = (val) => {
+    setSelectedVoiceModel(val);
+    if (socketRef.current) {
+      socketRef.current.emit("stop_tts_stream");
+      socketRef.current.emit("setVoiceModel", val);
+    }
+  };
+
   return (
     <div className="row g-4 h-100">
       <div className="col-md-4">
@@ -59,7 +69,8 @@ function UserPanel() {
           </div>
           <div className="card-body">
             <LanguageSelector selectedLanguage={selectedLanguage} onLanguageChange={changeLang} />
-            <ListenSpeech socketRef={socketRef.current} />
+            <VoiceModelSelector selectedVoiceModel={selectedVoiceModel} onChange={changeVoiceModel} />
+            {socketRef.current && <ListenSpeech socketRef={socketRef.current} />}
           </div>
           <div className="alert alert-info m-3">
             You will see real-time transcriptions of the admin's speech in your selected language below.
