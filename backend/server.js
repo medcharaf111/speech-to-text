@@ -2,7 +2,7 @@ require("dotenv").config(); // Load environment variables from .env file
 
 const fs = require("fs");
 const http = require("http");
-const socketIo = require("socket.io");
+const { Server } = require("socket.io");
 const { createClient, LiveTranscriptionEvents, LiveTTSEvents } = require("@deepgram/sdk");
 const { TranslationServiceClient } = require("@google-cloud/translate").v3;
 const cors = require("cors");
@@ -13,7 +13,7 @@ const translateClient = new TranslationServiceClient();
 
 const app = express();
 const server = http.createServer(app);
-const io = socketIo(server, { cors: { origin: "*" } });
+const io = new Server(server, { cors: { origin: "*" } });
 
 app.use(cors());
 app.use(express.json());

@@ -6,7 +6,7 @@ const SOCKET_EVENT_NAME = "tts_audio_chunk";
 const sampleRate = 48000;
 const channels = 1;
 const bufferingSec = 0.1;
-const playbackRate = 0.95; // 90% speed (slower)
+const playbackRate = 1; // 90% speed (slower)
 
 const ListenSpeech = ({ socketRef }) => {
   const [isMuted, setIsMuted] = useState(false);
