@@ -141,7 +141,7 @@ async function processAdminTextQueue(socketId, voiceModel, language) {
     const audioContent = response.audioContent; // This is a Buffer
 
     // Broadcast the audio data to all connected clients (excluding the admin themselves if desired)
-    io.emit("tts_audio_chunk", audioContent);
+    io.to(socketId).emit("tts_audio_chunk", audioContent);
   } catch (error) {
     console.error(`Error synthesizing speech for admin ${socketId}:`, error);
     // Optionally notify the admin of the error
