@@ -9,27 +9,27 @@
   },
   {
     "code": "zh",
-    "name": "Chinese (Mandarin, Simplified)"
+    "name": "Mandarin Chinese (General)"
   },
   {
     "code": "zh-CN",
-    "name": "Chinese (Mandarin, Simplified)"
+    "name": "Mandarin Chinese (Mainland China)"
   },
   {
     "code": "zh-Hans",
-    "name": "Chinese (Mandarin, Simplified)"
+    "name": "Mandarin Chinese (Simplified Script)"
   },
   {
     "code": "zh-TW",
-    "name": "Chinese (Mandarin, Traditional)"
+    "name": "Mandarin Chinese (Taiwan)"
   },
   {
     "code": "zh-Hant",
-    "name": "Chinese (Mandarin, Traditional)"
+    "name": "Mandarin Chinese (Traditional Script)"
   },
   {
     "code": "zh-HK",
-    "name": "Chinese (Cantonese, Traditional)"
+    "name": "Cantonese Chinese (Hong Kong)"
   },
   {
     "code": "cs",

@@ -3,11 +3,11 @@ import LanguageSelector from "./LanguageSelector";
 import Transcription from "./Transcription";
 
 function AdminTranscription({ socketRef }) {
-  const [selectedLanguage, setSelectedLanguage] = useState("en-US");
+  const [selectedLanguage, setSelectedLanguage] = useState("en");
   const [lines, setLines] = useState("");
 
   useEffect(() => {
-    socketRef.current.emit("init:client", { selectedLanguage, voiceModel: "aura-2-apollo-en" });
+    socketRef.current.emit("init:client", { language: selectedLanguage });
 
     socketRef.current.on("transcript", ({ text, isFinal }) => {
       if (isFinal) {

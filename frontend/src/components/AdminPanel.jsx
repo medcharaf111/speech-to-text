@@ -270,7 +270,7 @@ function AdminPanel({ isRecording, setIsRecording }) {
                     barWidth={3}
                     gap={2}
                     backgroundColor="transparent"
-                    barColor="#28a745"
+                    barColor="#467efc"
                     fftSize={512}
                     maxDecibels={-10}
                     minDecibels={-80}

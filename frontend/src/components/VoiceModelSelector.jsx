@@ -1,15 +1,33 @@
+import { useEffect, useState } from "react";
 import Select from "react-select";
+import { fetchVoiceModel } from "../utils/api";
 
-const voiceModels = [
-  { value: "aura-2-thalia-en", label: "Thalia (Female)" },
-  { value: "aura-2-andromeda-en", label: "Andromeda (Female)" },
-  { value: "aura-2-helena-en", label: "Helena (Female)" },
-  { value: "aura-2-apollo-en", label: "Apollo (Male)" },
-  { value: "aura-2-arcas-en", label: "Arcas (Male)" },
-  { value: "aura-2-aries-en", label: "Aries (Male)" },
-];
+function camelize(str) {
+  return str.charAt(0).toUpperCase() + str.slice(1).toLowerCase();
+}
 
-const VoiceModelSelector = ({ selectedVoiceModel, onChange }) => {
+const VoiceModelSelector = ({ selectedVoiceModel, onChange, selectedLanguage }) => {
+  const [voiceModels, setVoiceModels] = useState([]);
+
+  useEffect(() => {
+    const getVoiceModel = async () => {
+      try {
+        const languageList = await fetchVoiceModel(selectedLanguage);
+        setVoiceModels(
+          languageList.map((item) => ({
+            value: item.name,
+            label: `${item.name.split("-").pop()} (${camelize(item.ssmlGender)})`,
+          }))
+        );
+        onChange(languageList[0]?.name || "en-US-Neural2-C");
+      } catch (error) {
+        console.error("Failed to fetch languages:", error);
+      }
+    };
+
+    getVoiceModel();
+  }, [selectedLanguage]);
+
   return (
     <div className="form-group mt-3">
       <label className="form-label fw-bold">Select Your Voice Model</label>

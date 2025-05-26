@@ -11,3 +11,13 @@ export const fetchLanguages = async (isAdmin) => {
     throw error;
   }
 };
+
+export const fetchVoiceModel = async (language) => {
+  try {
+    const response = await axios.get(`${API_URL}/api/voiceModelList?language=${language}`);
+    return response.data;
+  } catch (error) {
+    console.error("Error fetching languages:", error);
+    throw error;
+  }
+};

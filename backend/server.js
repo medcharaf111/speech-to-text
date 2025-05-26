@@ -3,13 +3,16 @@ require("dotenv").config(); // Load environment variables from .env file
 const fs = require("fs");
 const http = require("http");
 const { Server } = require("socket.io");
-const { createClient, LiveTranscriptionEvents, LiveTTSEvents } = require("@deepgram/sdk");
+const { createClient, LiveTranscriptionEvents } = require("@deepgram/sdk");
+const textToSpeech = require("@google-cloud/text-to-speech");
 const { TranslationServiceClient } = require("@google-cloud/translate").v3;
 const cors = require("cors");
 const express = require("express");
+const { getVoiceLangCode } = require("./utils");
 
 const deepgram = createClient(process.env.DEEPGRAM_API_KEY);
 const translateClient = new TranslationServiceClient();
+const ttsClient = new textToSpeech.TextToSpeechClient();
 
 const app = express();
 const server = http.createServer(app);
@@ -20,19 +23,18 @@ app.use(express.json());
 
 let adminSocket = null;
 const clients = new Map(); // socket -> { language: '' }
+const adminTextQueues = new Map(); // Map: socket.id -> { textQueue: [], isProcessing: boolean }
 let recognizeStream = null;
 
 io.on("connection", (socket) => {
-  let dgConnection; // Deepgram live connection
-
   socket.on("init:admin", () => {
     adminSocket = socket;
     socket.isAdmin = true;
   });
 
-  socket.on("init:client", ({ language = "en-US", voiceModel }) => {
+  socket.on("init:client", ({ language }) => {
     clients.set(socket, { language });
-    dgConnection = initSpeakingStream(socket, dgConnection, voiceModel);
+    adminTextQueues.set(socket.id, { textQueue: [], isProcessing: false });
   });
 
   socket.on("setLanguage", (language) => {
@@ -41,11 +43,11 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("setVoiceModel", (voiceModel) => {
-    if (clients.has(socket)) {
-      dgConnection = initSpeakingStream(socket, dgConnection, voiceModel);
-    }
-  });
+  // socket.on("setVoiceModel", (voiceModel) => {
+  //   if (clients.has(socket)) {
+  //     clients.get(socket).language = voiceModel;
+  //   }
+  // });
 
   socket.on("stop:admin", () => {
     if (socket.isAdmin) stopRecognitionStream();
@@ -65,21 +67,17 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("tts_send_text", (text) => {
-    if (dgConnection) {
-      dgConnection.sendText(text); // Send text
-      dgConnection.flush();
+  socket.on("tts_send_text", (text, voiceModel, language) => {
+    const adminState = adminTextQueues.get(socket.id);
+    if (adminState) {
+      adminState.textQueue.push(text);
+      processAdminTextQueue(socket.id, voiceModel, getVoiceLangCode(language)); // Continue processing or add to queue
     }
   });
 
   socket.on("stop_tts_stream", () => {
     console.log("Received stop_tts_stream from client.");
-    if (dgConnection && dgConnection.getReadyState() === WebSocket.OPEN) {
-      dgConnection.flush(); // Flush any remaining text
-      dgConnection.requestClose(); // Close Deepgram connection
-      dgConnection = null;
-      console.log("Deepgram TTS connection explicitly finished.");
-    }
+    adminTextQueues.delete(socket.id);
   });
 
   socket.on("disconnect", () => {
@@ -88,10 +86,7 @@ io.on("connection", (socket) => {
       adminSocket = null;
     } else {
       clients.delete(socket);
-
-      if (!dgConnection) return;
-      dgConnection.requestClose();
-      dgConnection = null;
+      adminTextQueues.delete(socket.id);
     }
   });
 });
@@ -128,38 +123,37 @@ function startRecognitionStream(adminLang) {
   });
 }
 
-function initSpeakingStream(socket, dgConnection, voiceModel) {
-  if (dgConnection && dgConnection.getReadyState() === WebSocket.OPEN) {
-    console.log("Existing Deepgram connection, flushing and sending new text.");
-    dgConnection.flush();
+async function processAdminTextQueue(socketId, voiceModel, language) {
+  const adminState = adminTextQueues.get(socketId);
+  if (!adminState || adminState.isProcessing || adminState.textQueue.length === 0) {
     return;
   }
 
+  adminState.isProcessing = true;
+  const textToSynthesize = adminState.textQueue.shift(); // Get the next chunk of text
   try {
-    const dgConn = deepgram.speak.live({
-      model: voiceModel, // Choose your desired Deepgram voice model
-      encoding: "linear16", // Recommended for real-time streaming
-      sample_rate: 48000, // Sample rate should match what your client expects
-    });
+    const request = {
+      input: { text: textToSynthesize },
+      voice: { languageCode: language, name: voiceModel, ssmlGender: "FEMALE" }, // Use your preferred voice
+      audioConfig: { audioEncoding: "MP3" },
+    };
+    const [response] = await ttsClient.synthesizeSpeech(request);
+    const audioContent = response.audioContent; // This is a Buffer
 
-    dgConn.on(LiveTTSEvents.Open, () => {
-      dgConn.on(LiveTTSEvents.Audio, (audioChunk) => {
-        socket.emit("tts_audio_chunk", audioChunk); // Emit audio data to the client
-      });
-
-      dgConn.on(LiveTTSEvents.Close, () => {
-        console.log("Deepgram TTS connection closed.");
-      });
-
-      dgConn.on(LiveTTSEvents.Error, (error) => {
-        console.log("Deepgram TTS error:", error);
-        socket.emit("tts_error", "Deepgram TTS error occurred.");
-      });
-    });
-    return dgConn;
+    // Broadcast the audio data to all connected clients (excluding the admin themselves if desired)
+    io.emit("tts_audio_chunk", audioContent);
   } catch (error) {
-    console.error("Error starting Deepgram TTS connection:", error);
-    socket.emit("tts_error", "Failed to start TTS connection.");
+    console.error(`Error synthesizing speech for admin ${socketId}:`, error);
+    // Optionally notify the admin of the error
+    io.to(socketId).emit("admin:synthesisError", "Failed to synthesize speech chunk.");
+  } finally {
+    adminState.isProcessing = false;
+    // Process the next item in the queue recursively
+    if (adminState.textQueue.length > 0) {
+      processAdminTextQueue(socketId, voiceModel, language);
+    } else {
+      io.to(socketId).emit("admin:queueEmpty"); // Notify admin when queue is cleared
+    }
   }
 }
 
@@ -170,7 +164,7 @@ function stopRecognitionStream() {
 }
 
 async function translateText(text, targetLanguage, sourceLanguage) {
-  if (targetLanguage === sourceLanguage) {
+  if (targetLanguage === sourceLanguage || sourceLanguage.includes(targetLanguage)) {
     return text;
   }
 
@@ -223,6 +217,21 @@ app.get("/api/languages", (req, res) => {
     fs.readFileSync(req.query.isAdmin === "true" ? "./admin_languages.json" : "./languages.json", "utf-8")
   );
   res.json(supportedLanguages);
+});
+
+app.get("/api/voiceModelList", async (req, res) => {
+  try {
+    const langCode = getVoiceLangCode(req.query.language);
+    let response = await ttsClient.listVoices();
+    response = response[0].voices.map((item) => ({ ...item, languageCodes: item.languageCodes[0] }));
+    const list = response.filter(
+      (item) => item.languageCodes === langCode && (item.name.includes("Chirp3") || item.name.includes("Standard"))
+    );
+    res.json(list);
+  } catch (error) {
+    console.log(error);
+    res.status(405).send("Error" + String(error));
+  }
 });
 
 const PORT = process.env.PORT || 3001; // Fallback port

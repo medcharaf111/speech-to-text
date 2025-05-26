@@ -11,19 +11,29 @@ const wsUrl = import.meta.env.VITE_APP_API_URL;
 function UserPanel() {
   const socketRef = useRef(null);
   const [lines, setLines] = useState("");
-  const [selectedLanguage, setSelectedLanguage] = useState("en-US");
-  const [selectedVoiceModel, setSelectedVoiceModel] = useState("aura-2-apollo-en");
+  const [selectedLanguage, setSelectedLanguage] = useState("en");
+  const [selectedVoiceModel, setSelectedVoiceModel] = useState("en-US-Neural2-C");
+  const languageRef = useRef(selectedLanguage);
+  const voiceModelRef = useRef(selectedVoiceModel);
+
+  useEffect(() => {
+    languageRef.current = selectedLanguage;
+  }, [selectedLanguage]);
+
+  useEffect(() => {
+    voiceModelRef.current = selectedVoiceModel;
+  }, [selectedVoiceModel]);
 
   useEffect(() => {
     socketRef.current = io(wsUrl);
 
     socketRef.current.on("connect", () => {
-      socketRef.current.emit("init:client", { selectedLanguage, voiceModel: selectedVoiceModel });
+      socketRef.current.emit("init:client", { language: selectedLanguage });
     });
 
     socketRef.current.on("transcript", ({ text, isFinal }) => {
       if (isFinal) {
-        socketRef.current.emit("tts_send_text", text);
+        socketRef.current.emit("tts_send_text", text, voiceModelRef.current, languageRef.current);
 
         setLines((prev) => {
           const cleanedPrev = prev.trim().replace(/,\s*$/, "");
@@ -49,10 +59,10 @@ function UserPanel() {
 
   const changeVoiceModel = (val) => {
     setSelectedVoiceModel(val);
-    if (socketRef.current) {
-      socketRef.current.emit("stop_tts_stream");
-      socketRef.current.emit("setVoiceModel", val);
-    }
+    // if (socketRef.current) {
+    //   socketRef.current.emit("stop_tts_stream");
+    //   socketRef.current.emit("setVoiceModel", val);
+    // }
   };
 
   return (
@@ -67,7 +77,11 @@ function UserPanel() {
           </div>
           <div className="card-body">
             <LanguageSelector selectedLanguage={selectedLanguage} onLanguageChange={changeLang} />
-            <VoiceModelSelector selectedVoiceModel={selectedVoiceModel} onChange={changeVoiceModel} />
+            <VoiceModelSelector
+              selectedVoiceModel={selectedVoiceModel}
+              onChange={changeVoiceModel}
+              selectedLanguage={selectedLanguage}
+            />
             {socketRef.current && <ListenSpeech socketRef={socketRef.current} />}
           </div>
           <div className="alert alert-info m-3">
