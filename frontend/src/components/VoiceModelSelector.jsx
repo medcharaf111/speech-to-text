@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import Select from "react-select";
 import { fetchVoiceModel } from "../utils/api";
+import { FaExclamationTriangle } from "react-icons/fa";
 
 function camelize(str) {
   return str.charAt(0).toUpperCase() + str.slice(1).toLowerCase();
@@ -8,6 +9,7 @@ function camelize(str) {
 
 const VoiceModelSelector = ({ selectedVoiceModel, onChange, selectedLanguage }) => {
   const [voiceModels, setVoiceModels] = useState([]);
+  const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
     const getVoiceModel = async () => {
@@ -19,9 +21,11 @@ const VoiceModelSelector = ({ selectedVoiceModel, onChange, selectedLanguage }) 
             label: `${item.name.split("-").pop()} (${camelize(item.ssmlGender)})`,
           }))
         );
-        onChange(languageList[0]?.name || "en-US-Neural2-C");
+        onChange(languageList?.[0]?.name);
+        setIsLoading(false);
       } catch (error) {
         console.error("Failed to fetch languages:", error);
+        setIsLoading(false);
       }
     };
 
@@ -38,6 +42,22 @@ const VoiceModelSelector = ({ selectedVoiceModel, onChange, selectedLanguage }) 
         onChange={(item) => onChange(item.value)}
         isSearchable
       />
+      {!isLoading && voiceModels.length <= 0 && (
+        <div
+          style={{
+            background: "#fffbe6",
+            border: "1px solid #ffe58f",
+            padding: 10,
+            borderRadius: 4,
+            cursor: "pointer",
+            display: "inline-block",
+            marginBottom: 12,
+          }}
+        >
+          <FaExclamationTriangle style={{ marginRight: 6 }} />
+          Real-time speech is not supported in this language.
+        </div>
+      )}
     </div>
   );
 };

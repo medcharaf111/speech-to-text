@@ -33,7 +33,8 @@ function UserPanel() {
 
     socketRef.current.on("transcript", ({ text, isFinal }) => {
       if (isFinal) {
-        socketRef.current.emit("tts_send_text", text, voiceModelRef.current, languageRef.current);
+        if (voiceModelRef.current)
+          socketRef.current.emit("tts_send_text", text, voiceModelRef.current, languageRef.current);
 
         setLines((prev) => {
           const cleanedPrev = prev.trim().replace(/,\s*$/, "");
@@ -85,7 +86,7 @@ function UserPanel() {
             {socketRef.current && <ListenSpeech socketRef={socketRef.current} />}
           </div>
           <div className="alert alert-info m-3">
-            You will see real-time transcriptions of the admin's speech in your selected language below.
+            You will see real-time transcriptions and speech of the admin's speech in your selected language.
           </div>
         </div>
       </div>

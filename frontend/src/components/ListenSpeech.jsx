@@ -166,8 +166,7 @@ const ListenSpeech = ({ socketRef }) => {
           Click or tap to enable audio
         </div>
       )}
-
-      {isPlaying && !isUserGestureNeeded && (
+      {isPlaying && (
         <>
           {mediaRecorderRef.current && analyserNodeRef.current && (
             <div className="p-3 bg-light rounded border w-100 d-flex align-items-center justify-content-center">

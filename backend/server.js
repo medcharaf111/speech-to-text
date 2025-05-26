@@ -15,15 +15,14 @@ const translateClient = new TranslationServiceClient();
 const ttsClient = new textToSpeech.TextToSpeechClient();
 
 const app = express();
-const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*" } });
-
 app.use(cors());
 app.use(express.json());
 
+const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: "*" } });
+
 let adminSocket = null;
-const clients = new Map(); // socket -> { language: '' }
-const adminTextQueues = new Map(); // Map: socket.id -> { textQueue: [], isProcessing: boolean }
+const clients = new Map(); // socket -> { language: '' , textQueue: [], isProcessing: boolean}
 let recognizeStream = null;
 
 io.on("connection", (socket) => {
@@ -33,21 +32,14 @@ io.on("connection", (socket) => {
   });
 
   socket.on("init:client", ({ language }) => {
-    clients.set(socket, { language });
-    adminTextQueues.set(socket.id, { textQueue: [], isProcessing: false });
+    clients.set(socket.id, { language, textQueue: [], isProcessing: false });
   });
 
   socket.on("setLanguage", (language) => {
-    if (clients.has(socket)) {
-      clients.get(socket).language = language;
+    if (clients.has(socket.id)) {
+      clients.get(socket.id).language = language;
     }
   });
-
-  // socket.on("setVoiceModel", (voiceModel) => {
-  //   if (clients.has(socket)) {
-  //     clients.get(socket).language = voiceModel;
-  //   }
-  // });
 
   socket.on("stop:admin", () => {
     if (socket.isAdmin) stopRecognitionStream();
@@ -68,7 +60,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("tts_send_text", (text, voiceModel, language) => {
-    const adminState = adminTextQueues.get(socket.id);
+    const adminState = clients.get(socket.id);
     if (adminState) {
       adminState.textQueue.push(text);
       processAdminTextQueue(socket.id, voiceModel, getVoiceLangCode(language)); // Continue processing or add to queue
@@ -77,7 +69,7 @@ io.on("connection", (socket) => {
 
   socket.on("stop_tts_stream", () => {
     console.log("Received stop_tts_stream from client.");
-    adminTextQueues.delete(socket.id);
+    clients.delete(socket.id);
   });
 
   socket.on("disconnect", () => {
@@ -85,8 +77,7 @@ io.on("connection", (socket) => {
       stopRecognitionStream();
       adminSocket = null;
     } else {
-      clients.delete(socket);
-      adminTextQueues.delete(socket.id);
+      clients.delete(socket.id);
     }
   });
 });
@@ -124,7 +115,7 @@ function startRecognitionStream(adminLang) {
 }
 
 async function processAdminTextQueue(socketId, voiceModel, language) {
-  const adminState = adminTextQueues.get(socketId);
+  const adminState = clients.get(socketId);
   if (!adminState || adminState.isProcessing || adminState.textQueue.length === 0) {
     return;
   }
@@ -140,8 +131,7 @@ async function processAdminTextQueue(socketId, voiceModel, language) {
     const [response] = await ttsClient.synthesizeSpeech(request);
     const audioContent = response.audioContent; // This is a Buffer
 
-    // Broadcast the audio data to all connected clients (excluding the admin themselves if desired)
-    io.to(socketId).emit("tts_audio_chunk", audioContent);
+    io.to(socketId).emit("tts_audio_chunk", audioContent); // Send the audio data to socketId connected clients
   } catch (error) {
     console.error(`Error synthesizing speech for admin ${socketId}:`, error);
     // Optionally notify the admin of the error
@@ -192,11 +182,11 @@ async function onSpeechData(data, adminLang) {
 
   try {
     const translationPromises = [];
-    for (const [socket, { language: clientLanguage }] of clients) {
+    for (const [socketId, { language: clientLanguage }] of clients) {
       translationPromises.push(
         translateText(text, clientLanguage, adminLang)
           .then((translatedText) => {
-            socket.emit("transcript", { text: translatedText, isFinal, language: clientLanguage });
+            io.to(socketId).emit("transcript", { text: translatedText, isFinal, language: clientLanguage });
           })
           .catch((error) => {
             // This catch is for errors in emitting or post-processing
