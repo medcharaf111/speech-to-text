@@ -8,7 +8,7 @@ const textToSpeech = require("@google-cloud/text-to-speech");
 const { TranslationServiceClient } = require("@google-cloud/translate").v3;
 const cors = require("cors");
 const express = require("express");
-const { getVoiceLangCode } = require("./utils");
+const { getVoiceLangCode, filterVoices } = require("./utils");
 
 const deepgram = createClient(process.env.DEEPGRAM_API_KEY);
 const translateClient = new TranslationServiceClient();
@@ -204,7 +204,7 @@ async function onSpeechData(data, adminLang) {
 // API routes for List of supported languages
 app.get("/api/languages", (req, res) => {
   const supportedLanguages = JSON.parse(
-    fs.readFileSync(req.query.isAdmin === "true" ? "./admin_languages.json" : "./languages.json", "utf-8")
+    fs.readFileSync(req.query.isAdmin === "true" ? "./static/admin_languages.json" : "./static/languages.json", "utf-8")
   );
   res.json(supportedLanguages);
 });
@@ -212,11 +212,8 @@ app.get("/api/languages", (req, res) => {
 app.get("/api/voiceModelList", async (req, res) => {
   try {
     const langCode = getVoiceLangCode(req.query.language);
-    let response = await ttsClient.listVoices();
-    response = response[0].voices.map((item) => ({ ...item, languageCodes: item.languageCodes[0] }));
-    const list = response.filter(
-      (item) => item.languageCodes === langCode && (item.name.includes("Chirp3") || item.name.includes("Standard"))
-    );
+    const response = await ttsClient.listVoices();
+    const list = filterVoices(response[0].voices, langCode);
     res.json(list);
   } catch (error) {
     console.log(error);

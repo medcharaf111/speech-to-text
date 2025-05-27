@@ -14,3 +14,19 @@ export function getVoiceLangCode(language) {
       return `${language}-${regionCode.toUpperCase()}`;
   }
 }
+
+export function filterVoices(res, lang) {
+  res = res.map((item) => ({ ...item, languageCodes: item.languageCodes[0] }));
+
+  const pick = (gender, count) =>
+    res
+      .filter((v) => v.languageCodes === lang && v.ssmlGender === gender)
+      .sort(
+        (a, b) =>
+          b.name.includes("Chirp3") - a.name.includes("Chirp3") ||
+          b.name.includes("Standard") - a.name.includes("Standard")
+      )
+      .slice(0, count);
+
+  return [...pick("FEMALE", 3), ...pick("MALE", 2)];
+}
