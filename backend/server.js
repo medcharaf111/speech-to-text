@@ -83,6 +83,7 @@ io.on("connection", (socket) => {
 });
 
 function startRecognitionStream(adminLang) {
+  console.log("Starting Deepgram stream with language:", adminLang);
   recognizeStream = deepgram.listen.live({
     model: adminLang == "en-US" ? "nova-3" : "nova-2",
     language: adminLang, //adminLang == "en-US" ? "multi" : adminLang,
@@ -91,10 +92,13 @@ function startRecognitionStream(adminLang) {
     // utterance_end_ms: 3000,
     // endpointing: 100,
   });
+  
   recognizeStream.on(LiveTranscriptionEvents.Open, () => {
+    console.log("Deepgram connection opened successfully");
     recognizeStream.on(LiveTranscriptionEvents.Transcript, (data) => {
       const transcript = data.channel?.alternatives?.[0]?.transcript;
       if (transcript) {
+        console.log("Transcript received:", transcript);
         onSpeechData(
           {
             transcript,
@@ -104,8 +108,8 @@ function startRecognitionStream(adminLang) {
         );
       }
     });
-    recognizeStream.on(LiveTranscriptionEvents.Close, () => {
-      console.log("Deepgram connection closed.");
+    recognizeStream.on(LiveTranscriptionEvents.Close, (closeEvent) => {
+      console.log("Deepgram connection closed.", closeEvent);
     });
     recognizeStream.on(LiveTranscriptionEvents.Error, (error) => {
       console.log("Deepgram error:", error);
