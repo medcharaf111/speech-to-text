@@ -1,4 +1,5 @@
-require("dotenv").config(); // Load environment variables from .env file
+const path = require("path");
+require("dotenv").config({ path: path.join(__dirname, ".env") }); // Load env from backend folder explicitly
 
 const fs = require("fs");
 const http = require("http");
