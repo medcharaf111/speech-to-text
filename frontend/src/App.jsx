@@ -4,6 +4,7 @@ import AdminPanel from "./components/AdminPanel";
 import UserPanel from "./components/UserPanel";
 import AdminLogin from "./components/AdminLogin";
 import AuthGuard from "./components/AuthGuard";
+import PresentationDisplay from "./components/PresentationDisplay";
 import { BsMicFill } from "react-icons/bs";
 import { IoMdLogOut } from "react-icons/io";
 
@@ -63,6 +64,7 @@ const AppContent = () => {
                   </AuthGuard>
                 }
               />
+              <Route path="/presentation-display" element={<PresentationDisplay />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </div>

@@ -194,9 +194,19 @@ function AdminPanel({ isRecording, setIsRecording }) {
             <i className="bi bi-mic-fill me-2"></i>
             Speaker Controls
           </h3>
-          <span className={`badge ${isConnected ? "bg-success" : "bg-danger"}`}>
-            {isConnected ? "Connected" : "Disconnected"}
-          </span>
+          <div className="d-flex gap-2 align-items-center">
+            <button
+              className="btn btn-outline-primary btn-sm"
+              onClick={() => window.open("/presentation-display", "_blank")}
+              title="Open Presentation Display in new tab"
+            >
+              <i className="bi bi-projector me-1"></i>
+              Presentation Display
+            </button>
+            <span className={`badge ${isConnected ? "bg-success" : "bg-danger"}`}>
+              {isConnected ? "Connected" : "Disconnected"}
+            </span>
+          </div>
         </div>
         <div className="card-body">
           {error && (
