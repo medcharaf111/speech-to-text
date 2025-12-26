@@ -208,49 +208,51 @@ function PresentationDisplay() {
   };
 
   return (
-    <div style={{ minHeight: '100vh', background: 'linear-gradient(135deg, #1a1a2e 0%, #0f3460 100%)', color: 'white' }}>
+    <div style={{ minHeight: '100vh', background: '#ffffff', color: '#000000' }}>
       <div className="container-fluid" style={{ padding: '1.5rem' }}>
         {/* Header with controls */}
         <div style={{ marginBottom: '2rem' }}>
           <div className="d-flex justify-content-between align-items-center" style={{ 
-            background: 'linear-gradient(135deg, rgba(13, 110, 253, 0.15) 0%, rgba(23, 162, 184, 0.15) 100%)',
+            background: '#f8f9fa',
             padding: '1.2rem 1.5rem',
             borderRadius: '12px',
-            border: '1px solid rgba(255, 255, 255, 0.1)',
-            backdropFilter: 'blur(10px)'
+            border: '2px solid #e9ecef',
+            boxShadow: '0 2px 8px rgba(0, 0, 0, 0.08)'
           }}>
-            <h1 style={{ fontSize: '1.8rem', marginBottom: 0, fontWeight: '700', letterSpacing: '0.5px' }}>
-              <i className="bi bi-projector me-3"></i>
+            <h1 style={{ fontSize: '1.8rem', marginBottom: 0, fontWeight: '700', letterSpacing: '0.5px', color: '#000000' }}>
+              <i className="bi bi-projector me-3" style={{ color: '#0d6efd' }}></i>
               Live Transcription
               {isConnected ? (
                 <span style={{
                   marginLeft: '1rem',
                   padding: '0.4rem 0.8rem',
-                  backgroundColor: 'rgba(25, 186, 139, 0.3)',
-                  border: '1px solid #19ba8b',
+                  backgroundColor: '#d1f4e0',
+                  border: '2px solid #19ba8b',
                   borderRadius: '20px',
                   fontSize: '0.85rem',
                   display: 'inline-block',
-                  fontWeight: '500'
+                  fontWeight: '500',
+                  color: '#0d7a4f'
                 }}>● Connected</span>
               ) : (
                 <span style={{
                   marginLeft: '1rem',
                   padding: '0.4rem 0.8rem',
-                  backgroundColor: 'rgba(220, 53, 69, 0.3)',
-                  border: '1px solid #dc3545',
+                  backgroundColor: '#ffe0e0',
+                  border: '2px solid #dc3545',
                   borderRadius: '20px',
                   fontSize: '0.85rem',
                   display: 'inline-block',
-                  fontWeight: '500'
+                  fontWeight: '500',
+                  color: '#c92a2a'
                 }}>● Disconnected</span>
               )}
             </h1>
             <button style={{
               padding: '0.6rem 1.2rem',
-              backgroundColor: 'rgba(220, 53, 69, 0.2)',
-              color: '#ff6b6b',
-              border: '1px solid rgba(255, 107, 107, 0.5)',
+              backgroundColor: '#ffffff',
+              color: '#dc3545',
+              border: '2px solid #dc3545',
               borderRadius: '8px',
               cursor: 'pointer',
               fontSize: '0.95rem',
@@ -261,11 +263,13 @@ function PresentationDisplay() {
               gap: '0.5rem'
             }}
             onMouseEnter={(e) => {
-              e.target.style.backgroundColor = 'rgba(220, 53, 69, 0.4)';
+              e.target.style.backgroundColor = '#dc3545';
+              e.target.style.color = '#ffffff';
               e.target.style.transform = 'scale(1.05)';
             }}
             onMouseLeave={(e) => {
-              e.target.style.backgroundColor = 'rgba(220, 53, 69, 0.2)';
+              e.target.style.backgroundColor = '#ffffff';
+              e.target.style.color = '#dc3545';
               e.target.style.transform = 'scale(1)';
             }}
             onClick={clearTranscripts}>
@@ -278,14 +282,23 @@ function PresentationDisplay() {
         {/* Language selector */}
         <div style={{ marginBottom: '2rem' }}>
           <div style={{
-            background: 'linear-gradient(135deg, rgba(13, 110, 253, 0.1) 0%, rgba(23, 162, 184, 0.1) 100%)',
+            background: '#f8f9fa',
             padding: '1.2rem 1.5rem',
             borderRadius: '12px',
-            border: '1px solid rgba(255, 255, 255, 0.1)',
-            backdropFilter: 'blur(10px)'
+            border: '2px solid #e9ecef',
+            boxShadow: '0 2px 8px rgba(0, 0, 0, 0.08)'
           }}>
-            <label style={{ fontSize: '1rem', fontWeight: '600', marginBottom: '1rem', display: 'block' }}>
-              <i className="bi bi-translate me-2"></i>
+            <label style={{ 
+              fontSize: '1rem', 
+              fontWeight: '600', 
+              marginBottom: '1rem', 
+              display: 'inline-block',
+              color: '#2c3e50',
+              backgroundColor: '#e8ecef',
+              padding: '0.5rem 1rem',
+              borderRadius: '20px'
+            }}>
+              <i className="bi bi-translate me-2" style={{ color: '#0d6efd' }}></i>
               Select Languages to Display
             </label>
               <Select
@@ -303,20 +316,20 @@ function PresentationDisplay() {
                 styles={{
                   control: (base) => ({
                     ...base,
-                    backgroundColor: "rgba(79, 89, 102, 0.5)",
-                    borderColor: "rgba(255, 255, 255, 0.2)",
-                    color: "#fff",
+                    backgroundColor: "#ffffff",
+                    borderColor: "#ced4da",
+                    color: "#000000",
                     borderRadius: "8px",
-                    border: "1px solid rgba(255, 255, 255, 0.2)",
-                    boxShadow: "0 0 20px rgba(13, 110, 253, 0.1)",
+                    border: "2px solid #ced4da",
+                    boxShadow: "0 2px 4px rgba(0, 0, 0, 0.08)",
                     transition: "all 0.3s ease",
                   }),
                   menu: (base) => ({
                     ...base,
-                    backgroundColor: "rgba(52, 58, 64, 0.95)",
-                    backdropFilter: "blur(10px)",
+                    backgroundColor: "#ffffff",
                     borderRadius: "8px",
-                    border: "1px solid rgba(255, 255, 255, 0.1)",
+                    border: "2px solid #e9ecef",
+                    boxShadow: "0 4px 12px rgba(0, 0, 0, 0.15)",
                     zIndex: 9999,
                   }),
                   menuPortal: (base) => ({
@@ -325,25 +338,25 @@ function PresentationDisplay() {
                   }),
                   option: (base, state) => ({
                     ...base,
-                    backgroundColor: state.isFocused ? "rgba(13, 110, 253, 0.5)" : "rgba(52, 58, 64, 0.5)",
-                    color: "#fff",
+                    backgroundColor: state.isFocused ? "#e7f3ff" : "#ffffff",
+                    color: "#000000",
                     borderRadius: "4px",
                     margin: "0.2rem",
                     transition: "all 0.2s ease",
                   }),
                   multiValue: (base) => ({
                     ...base,
-                    backgroundColor: "rgba(13, 110, 253, 0.6)",
+                    backgroundColor: "#e8ecef",
                     borderRadius: "6px",
                   }),
                   multiValueLabel: (base) => ({
                     ...base,
-                    color: "#fff",
+                    color: "#2c3e50",
                     fontWeight: "500",
                   }),
                   singleValue: (base) => ({
                     ...base,
-                    color: "#fff",
+                    color: "#000000",
                   }),
                 }}
               />
@@ -353,8 +366,8 @@ function PresentationDisplay() {
         {/* Transcripts display */}
         {selectedLanguages.length === 0 ? (
           <div style={{ textAlign: 'center', padding: '3rem' }}>
-            <i className="bi bi-info-circle" style={{ fontSize: "4rem", opacity: 0.3, display: 'block', marginBottom: '1rem' }}></i>
-            <p style={{ fontSize: '1.1rem', color: 'rgba(255, 255, 255, 0.5)' }}>Select languages above to start displaying transcripts</p>
+            <i className="bi bi-info-circle" style={{ fontSize: "4rem", opacity: 0.3, display: 'block', marginBottom: '1rem', color: '#6c757d' }}></i>
+            <p style={{ fontSize: '1.1rem', color: '#6c757d' }}>Select languages above to start displaying transcripts</p>
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: getGap(), height: 'calc(100vh - 280px)' }}>
@@ -374,22 +387,22 @@ function PresentationDisplay() {
                   padding: 0,
                   margin: 0,
                   height: '100%',
-                  backgroundColor: 'rgba(79, 89, 102, 0.3)',
-                  border: '1px solid rgba(255, 255, 255, 0.1)',
+                  backgroundColor: '#ffffff',
+                  border: '2px solid #e9ecef',
                   borderRadius: '12px',
                   overflow: 'hidden',
-                  boxShadow: '0 8px 32px rgba(0, 0, 0, 0.3)',
-                  backdropFilter: 'blur(10px)',
+                  boxShadow: '0 4px 12px rgba(0, 0, 0, 0.1)',
                   transition: 'all 0.3s ease'
                 }}>
                   <div style={{
                     padding: getHeaderPadding(),
                     marginBottom: 0,
-                    background: `linear-gradient(135deg, rgba(13, 110, 253, 0.8) 0%, rgba(23, 162, 184, 0.8) 100%)`,
-                    borderBottom: '1px solid rgba(255, 255, 255, 0.1)'
+                    background: '#e8ecef',
+                    borderBottom: 'none',
+                    borderRadius: '8px 8px 0 0'
                   }}>
-                    <h5 style={{ marginBottom: 0, fontSize: getHeaderFontSize(), fontWeight: '600', letterSpacing: '0.3px' }}>
-                      <i className="bi bi-chat-dots me-2"></i>
+                    <h5 style={{ marginBottom: 0, fontSize: getHeaderFontSize(), fontWeight: '600', letterSpacing: '0.3px', color: '#2c3e50' }}>
+                      <i className="bi bi-chat-dots me-2" style={{ color: '#0d6efd' }}></i>
                       {lang.name}
                     </h5>
                   </div>
@@ -400,13 +413,13 @@ function PresentationDisplay() {
                       fontSize: getFontSize(),
                       lineHeight: getLineHeight(),
                       padding: getPadding(),
-                      color: '#ffffff',
-                      backgroundColor: 'transparent'
+                      color: '#000000',
+                      backgroundColor: '#ffffff'
                     }}
                   >
                     {transcripts[lang.code] ? (
                       <p 
-                        className="mb-0 text-white" 
+                        className="mb-0" 
                         style={{
                           display: '-webkit-box',
                           WebkitLineClamp: getMaxLines(),
@@ -416,13 +429,14 @@ function PresentationDisplay() {
                           width: '100%',
                           margin: 0,
                           whiteSpace: 'normal',
-                          wordWrap: 'break-word'
+                          wordWrap: 'break-word',
+                          color: '#000000'
                         }}
                       >
                         {transcripts[lang.code]}
                       </p>
                     ) : (
-                      <p className="text-muted fst-italic" style={{ margin: 0 }}>Waiting for transcription...</p>
+                      <p className="fst-italic" style={{ margin: 0, color: '#6c757d' }}>Waiting for transcription...</p>
                     )}
                   </div>
                 </div>
