@@ -33,6 +33,7 @@ function AdminPanel({ isRecording, setIsRecording }) {
   const mediaStreamRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const socketRef = useRef(null);
+  const isPausedRef = useRef(false);
 
   useEffect(() => {
     async function fetchMics() {
@@ -104,15 +105,45 @@ function AdminPanel({ isRecording, setIsRecording }) {
       setError(`Failed to connect to the server: ${err.message}`);
     };
 
+    const handlePauseRecording = () => {
+      console.log("Received pause_recording from server - stopping microphone");
+      isPausedRef.current = true;
+      
+      // Stop all audio tracks to disable the microphone
+      if (mediaStreamRef.current) {
+        mediaStreamRef.current.getTracks().forEach((track) => {
+          track.enabled = false;
+          console.log("Disabled audio track:", track.label);
+        });
+      }
+    };
+
+    const handleResumeRecording = () => {
+      console.log("Received resume_recording from server - enabling microphone");
+      isPausedRef.current = false;
+      
+      // Re-enable all audio tracks
+      if (mediaStreamRef.current) {
+        mediaStreamRef.current.getTracks().forEach((track) => {
+          track.enabled = true;
+          console.log("Enabled audio track:", track.label);
+        });
+      }
+    };
+
     currentSocket.on("connect", handleConnect);
     currentSocket.on("disconnect", handleDisconnect);
     currentSocket.on("connect_error", handleConnectError);
+    currentSocket.on("pause_recording", handlePauseRecording);
+    currentSocket.on("resume_recording", handleResumeRecording);
 
     return () => {
       console.log("Disconnecting socket");
       currentSocket.off("connect", handleConnect);
       currentSocket.off("disconnect", handleDisconnect);
       currentSocket.off("connect_error", handleConnectError);
+      currentSocket.off("pause_recording", handlePauseRecording);
+      currentSocket.off("resume_recording", handleResumeRecording);
       currentSocket.disconnect();
       socketRef.current = null;
     };
@@ -140,11 +171,13 @@ function AdminPanel({ isRecording, setIsRecording }) {
       mediaRecorderRef.current = recorder;
 
       recorder.ondataavailable = (event) => {
-        if (event.data.size > 0 && socketRef.current?.connected) {
+        if (event.data.size > 0 && socketRef.current?.connected && !isPausedRef.current) {
           socketRef.current.emit("audio", event.data);
         } else if (!socketRef.current?.connected) {
           console.warn("Socket disconnected during recording.");
           stopRecording(false);
+        } else if (isPausedRef.current) {
+          console.log("Skipping audio chunk - recording is paused");
         }
       };
 

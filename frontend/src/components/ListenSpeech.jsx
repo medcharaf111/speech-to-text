@@ -5,11 +5,12 @@ import { LiveAudioVisualizer } from "react-audio-visualize";
 
 const SOCKET_EVENT_NAME = "tts_audio_chunk";
 
-const ListenSpeech = ({ socketRef }) => {
+const ListenSpeech = ({ socketRef, onTTSStateChange }) => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const isConnected = socketRef.connected;
   const [isUserGestureNeeded, setIsUserGestureNeeded] = useState(false);
+  const isTTSActiveRef = useRef(false);
 
   // audio graph refs
   const audioCtxRef = useRef(null);
@@ -103,10 +104,19 @@ const ListenSpeech = ({ socketRef }) => {
 
   // 4️⃣ playNext: dequeue & invoke playBuffer
   const playNext = useCallback(() => {
-    if (isPlayingRef.current || audioQueue.current.length === 0) return;
+    if (isPlayingRef.current || audioQueue.current.length === 0) {
+      // If queue is empty and not playing, TTS is done - resume listening
+      if (!isPlayingRef.current && audioQueue.current.length === 0 && isTTSActiveRef.current) {
+        isTTSActiveRef.current = false;
+        console.log("TTS finished - emitting resume_listening");
+        socketRef.emit("resume_listening");
+        onTTSStateChange?.(false);
+      }
+      return;
+    }
     const next = audioQueue.current.shift();
     playBuffer(next);
-  }, [playBuffer]);
+  }, [playBuffer, socketRef, onTTSStateChange]);
 
   // wire up the ref so playBuffer/onended always see the latest playNext
   useEffect(() => {
@@ -115,16 +125,26 @@ const ListenSpeech = ({ socketRef }) => {
 
   // 5️⃣ Socket.IO: enqueue incoming buffers and kick off playNext
   useEffect(() => {
-    socketRef.on(SOCKET_EVENT_NAME, async (raw) => {
+    const handleAudioChunk = async (raw) => {
+      // First audio chunk - pause listening to prevent feedback
+      if (!isTTSActiveRef.current) {
+        isTTSActiveRef.current = true;
+        console.log("TTS starting - emitting pause_listening");
+        socketRef.emit("pause_listening");
+        onTTSStateChange?.(true);
+      }
+      
       const buf = raw instanceof ArrayBuffer ? raw : raw.buffer || (await raw.arrayBuffer());
       audioQueue.current.push(buf);
       playNext();
-    });
+    };
+    
+    socketRef.on(SOCKET_EVENT_NAME, handleAudioChunk);
 
     return () => {
-      // socket.disconnect();
+      socketRef.off(SOCKET_EVENT_NAME, handleAudioChunk);
     };
-  }, [playNext, socketRef]);
+  }, [playNext, socketRef, onTTSStateChange]);
 
   // 6️⃣ Mute/unmute + iOS resume
   const toggleMute = () => {

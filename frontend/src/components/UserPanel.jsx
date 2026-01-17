@@ -83,7 +83,12 @@ function UserPanel() {
               onChange={changeVoiceModel}
               selectedLanguage={selectedLanguage}
             />
-            {socketRef.current && <ListenSpeech socketRef={socketRef.current} />}
+            {socketRef.current && (
+              <ListenSpeech
+                socketRef={socketRef.current}
+                onTTSStateChange={(isActive) => console.log("TTS active:", isActive)}
+              />
+            )}
           </div>
           <div className="alert alert-info m-3">
             You will see real-time transcriptions and speech of the admin's speech in your selected language.

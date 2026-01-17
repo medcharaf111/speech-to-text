@@ -25,6 +25,8 @@ const io = new Server(server, { cors: { origin: "*" } });
 let adminSocket = null;
 const clients = new Map(); // socket -> { language: '' , textQueue: [], isProcessing: boolean}
 let recognizeStream = null;
+let isListeningPaused = false; // Track if listening is paused due to TTS
+let keepAliveInterval = null; // Keep-alive interval for Deepgram
 
 io.on("connection", (socket) => {
   socket.on("init:admin", () => {
@@ -55,7 +57,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("audio", (audioChunk) => {
-    if (socket === adminSocket && recognizeStream) {
+    if (socket === adminSocket && recognizeStream && !isListeningPaused) {
       recognizeStream.send(audioChunk);
     }
   });
@@ -73,6 +75,26 @@ io.on("connection", (socket) => {
     clients.delete(socket.id);
   });
 
+  socket.on("pause_listening", () => {
+    console.log("Received pause_listening request from socket:", socket.id);
+    isListeningPaused = true;
+    
+    // Notify admin to stop sending audio (if admin exists)
+    if (adminSocket) {
+      adminSocket.emit("pause_recording");
+    }
+  });
+
+  socket.on("resume_listening", () => {
+    console.log("Received resume_listening request from socket:", socket.id);
+    isListeningPaused = false;
+    
+    // Notify admin to resume sending audio
+    if (adminSocket) {
+      adminSocket.emit("resume_recording");
+    }
+  });
+
   socket.on("disconnect", () => {
     if (socket === adminSocket) {
       stopRecognitionStream();
@@ -87,8 +109,9 @@ function startRecognitionStream(adminLang) {
   console.log("Starting Deepgram stream with language:", adminLang);
   recognizeStream = deepgram.listen.live({
     model: adminLang == "en-US" ? "nova-3" : "nova-2",
-    language: adminLang, //adminLang == "en-US" ? "multi" : adminLang,
+    language: adminLang,
     smart_format: true,
+    interim_results: true, // Get interim results to keep connection alive
     // filler_words: true,
     // utterance_end_ms: 3000,
     // endpointing: 100,
@@ -96,6 +119,19 @@ function startRecognitionStream(adminLang) {
   
   recognizeStream.on(LiveTranscriptionEvents.Open, () => {
     console.log("Deepgram connection opened successfully");
+    
+    // Send keep-alive every 8 seconds to prevent timeout
+    keepAliveInterval = setInterval(() => {
+      if (recognizeStream) {
+        try {
+          recognizeStream.keepAlive();
+          console.log("Sent keep-alive to Deepgram");
+        } catch (err) {
+          console.log("Keep-alive failed:", err.message);
+        }
+      }
+    }, 8000);
+    
     recognizeStream.on(LiveTranscriptionEvents.Transcript, (data) => {
       const transcript = data.channel?.alternatives?.[0]?.transcript;
       if (transcript) {
@@ -153,6 +189,12 @@ async function processAdminTextQueue(socketId, voiceModel, language) {
 }
 
 function stopRecognitionStream() {
+  // Clear keep-alive interval
+  if (keepAliveInterval) {
+    clearInterval(keepAliveInterval);
+    keepAliveInterval = null;
+  }
+  
   if (!recognizeStream) return;
   recognizeStream.requestClose();
   recognizeStream = null;
@@ -179,7 +221,7 @@ async function translateText(text, targetLanguage, sourceLanguage) {
 }
 
 async function onSpeechData(data, adminLang) {
-  if (!data.transcript) {
+  if (!data.transcript || isListeningPaused) {
     return;
   }
   const text = data.transcript;
