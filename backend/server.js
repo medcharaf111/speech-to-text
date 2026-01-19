@@ -201,21 +201,37 @@ function stopRecognitionStream() {
 }
 
 async function translateText(text, targetLanguage, sourceLanguage) {
-  if (targetLanguage === sourceLanguage || sourceLanguage.includes(targetLanguage)) {
+  // Normalize language codes (e.g., "en-US" -> "en", "zh-CN" stays as "zh-CN")
+  const normalizeLanguageCode = (code) => {
+    // Keep Chinese variants as-is since they're distinct
+    if (code.startsWith('zh-')) return code;
+    // For others, extract base language code
+    return code.split('-')[0];
+  };
+
+  const normalizedTarget = normalizeLanguageCode(targetLanguage);
+  const normalizedSource = normalizeLanguageCode(sourceLanguage);
+
+  // Skip translation if source and target are the same
+  if (normalizedTarget === normalizedSource) {
     return text;
   }
+
+  console.log(`Translating from ${normalizedSource} to ${normalizedTarget}: "${text.substring(0, 50)}..."`);
 
   try {
     const [translationResponse] = await translateClient.translateText({
       parent: `projects/${process.env.GOOGLE_PROJECT_ID}/locations/global`,
       contents: [text],
       mimeType: "text/plain",
-      sourceLanguageCode: sourceLanguage,
-      targetLanguageCode: targetLanguage,
+      sourceLanguageCode: normalizedSource,
+      targetLanguageCode: normalizedTarget,
     });
-    return translationResponse.translations[0].translatedText;
+    const translatedText = translationResponse.translations[0].translatedText;
+    console.log(`Translation result: "${translatedText.substring(0, 50)}..."`);
+    return translatedText;
   } catch (error) {
-    console.error(`Error translating text to ${targetLanguage}:`, error);
+    console.error(`Error translating text from ${sourceLanguage} to ${targetLanguage}:`, error.message);
     return text; // Return original text if translation fails
   }
 }
