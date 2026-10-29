@@ -9,20 +9,30 @@ set -euo pipefail
 REPO=/root/seamo-speechtotext
 cd "$REPO"
 
-echo "== 1. keep the server's secrets out of git's way"
-cp -n backend/.env /root/backend.env.bak 2>/dev/null || true
-cp -n backend/seamo.json /root/seamo.json.bak 2>/dev/null || true
-git rm --cached --quiet backend/.env 2>/dev/null || true
-git rm --cached --quiet backend/seamo.json 2>/dev/null || true
-[ -f package-lock.json ] && mv -f package-lock.json /root/stray-root-package-lock.json || true
+echo "== 1. move the server's secrets out of git's way (put back automatically, even on failure)"
+TMP="/root/deploy-tmp.$$"
+mkdir -p "$TMP"
+restore_secrets() {
+  if [ -f "$TMP/.env" ]; then mv -f "$TMP/.env" "$REPO/backend/.env"; fi
+  if [ -f "$TMP/seamo.json" ]; then mv -f "$TMP/seamo.json" "$REPO/backend/seamo.json"; fi
+  rmdir "$TMP" 2>/dev/null || true
+  return 0
+}
+trap restore_secrets EXIT
+cp -f backend/.env /root/backend.env.bak
+cp -f backend/seamo.json /root/seamo.json.bak
+mv -f backend/.env "$TMP/.env"
+mv -f backend/seamo.json "$TMP/seamo.json"
+if [ -f package-lock.json ]; then mv -f package-lock.json /root/stray-root-package-lock.json; fi
 
 echo "== 2. pull the new code"
-git fetch -q origin
+git reset -q
 git checkout -q -- . 2>/dev/null || true
+git fetch -q origin
 git pull -q --ff-only origin main
 git log --oneline -1
-test -f backend/.env || cp /root/backend.env.bak backend/.env
-test -f backend/seamo.json || cp /root/seamo.json.bak backend/seamo.json
+restore_secrets
+trap - EXIT
 
 echo "== 3. backend dependencies"
 cd backend
