@@ -12,12 +12,16 @@ export const fetchLanguages = async (isAdmin) => {
   }
 };
 
-export const fetchVoiceModel = async (language) => {
+// Resolves to { token, expiresAt }. Throws an Error with a user-facing message on failure.
+export const adminLogin = async (email, password) => {
   try {
-    const response = await axios.get(`${API_URL}/api/voiceModelList?language=${language}`);
+    const response = await axios.post(`${API_URL}/api/admin/login`, { email, password });
     return response.data;
   } catch (error) {
-    console.error("Error fetching languages:", error);
-    throw error;
+    const status = error.response?.status;
+    const serverMessage = error.response?.data?.error;
+    if (status === 401) throw new Error("Invalid credentials. Please try again.");
+    if (status === 429) throw new Error(serverMessage || "Too many attempts. Try again later.");
+    throw new Error(serverMessage || "Could not reach the server. Please try again.");
   }
 };

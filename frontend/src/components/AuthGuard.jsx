@@ -1,13 +1,10 @@
-import React from "react";
 import { Navigate } from "react-router-dom";
+import { isAuthenticated } from "../utils/auth";
 
 const AuthGuard = ({ children }) => {
-  const isAuthenticated = localStorage.getItem("adminAuthenticated") === "true";
-
-  if (!isAuthenticated) {
+  if (!isAuthenticated()) {
     return <Navigate to="/admin-login" replace />;
   }
-
   return children;
 };
 

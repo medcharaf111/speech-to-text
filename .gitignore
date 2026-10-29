@@ -42,3 +42,5 @@ logs/
 Thumbs.db 
 seamo-speechtotext-4713d04e86a2.json
 deploy.sh
+backend/seamo.json
+backend/.env

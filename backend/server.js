@@ -1,288 +1,468 @@
-const path = require("path");
-require("dotenv").config({ path: path.join(__dirname, ".env") }); // Load env from backend folder explicitly
+"use strict";
 
+const path = require("path");
 const fs = require("fs");
 const http = require("http");
+const crypto = require("crypto");
+
+require("dotenv").config({ path: path.join(__dirname, ".env") });
+
+// Resolve the Google credentials file relative to this folder so it works regardless of the cwd.
+{
+  const cred = process.env.GOOGLE_APPLICATION_CREDENTIALS || "seamo.json";
+  process.env.GOOGLE_APPLICATION_CREDENTIALS = path.isAbsolute(cred) ? cred : path.join(__dirname, cred);
+}
+
+const express = require("express");
+const cors = require("cors");
 const { Server } = require("socket.io");
 const { createClient, LiveTranscriptionEvents } = require("@deepgram/sdk");
-const textToSpeech = require("@google-cloud/text-to-speech");
 const { TranslationServiceClient } = require("@google-cloud/translate").v3;
-const cors = require("cors");
-const express = require("express");
-const { getVoiceLangCode, filterVoices } = require("./utils");
 
-const deepgram = createClient(process.env.DEEPGRAM_API_KEY);
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+const cfg = {
+  port: Number(process.env.PORT) || 5000,
+  host: process.env.HOST || "0.0.0.0",
+  corsOrigin: process.env.CORS_ORIGIN || "*",
+  adminEmail: (process.env.ADMIN_EMAIL || "").trim().toLowerCase(),
+  adminPassword: process.env.ADMIN_PASSWORD || "",
+  tokenSecret: process.env.ADMIN_TOKEN_SECRET || "",
+  tokenTtlMs: (Number(process.env.ADMIN_TOKEN_TTL_HOURS) || 24) * 60 * 60 * 1000,
+  deepgramKey: process.env.DEEPGRAM_API_KEY || "",
+  deepgramModel: process.env.DEEPGRAM_MODEL || "",
+  // Leave unset: Deepgram's default endpointing gave one clean final per sentence in testing,
+  // while 300ms produced empty finals that dropped whole sentences.
+  endpointingMs: Number(process.env.DEEPGRAM_ENDPOINTING_MS) || 0,
+  googleProject: process.env.GOOGLE_PROJECT_ID || "",
+  pauseFromDisplay: (process.env.PAUSE_FROM_DISPLAY || "true") !== "false",
+  maxTranslateChars: Number(process.env.MAX_TRANSLATE_CHARS) || 2000,
+  loginMaxAttempts: 10,
+  loginWindowMs: 15 * 60 * 1000,
+};
+
+if (!cfg.adminEmail || !cfg.adminPassword) {
+  console.error("ADMIN_EMAIL and ADMIN_PASSWORD must be set in backend/.env; refusing to start.");
+  process.exit(1);
+}
+if (!cfg.deepgramKey) {
+  console.error("DEEPGRAM_API_KEY must be set in backend/.env; refusing to start.");
+  process.exit(1);
+}
+if (!cfg.tokenSecret) {
+  // Derived deterministically so a restart does not log the speaker out.
+  cfg.tokenSecret = crypto.createHash("sha256").update(`seamo-token:${cfg.adminPassword}`).digest("hex");
+}
+
+const listenerLanguages = JSON.parse(fs.readFileSync(path.join(__dirname, "static/languages.json"), "utf-8"));
+const adminLanguages = JSON.parse(fs.readFileSync(path.join(__dirname, "static/admin_languages.json"), "utf-8"));
+const listenerCodes = new Set(listenerLanguages.map((l) => l.code));
+const adminCodes = new Set(adminLanguages.map((l) => l.code));
+
+const deepgram = createClient(cfg.deepgramKey);
 const translateClient = new TranslationServiceClient();
-const ttsClient = new textToSpeech.TextToSpeechClient();
 
+// ---------------------------------------------------------------------------
+// Speaker authentication: password checked here, short-lived signed token for the socket.
+// ---------------------------------------------------------------------------
+function sha256(s) {
+  return crypto.createHash("sha256").update(String(s)).digest();
+}
+function safeEqual(a, b) {
+  return crypto.timingSafeEqual(sha256(a), sha256(b));
+}
+function sign(payload) {
+  return crypto.createHmac("sha256", cfg.tokenSecret).update(payload).digest("base64url");
+}
+function issueToken() {
+  const exp = String(Date.now() + cfg.tokenTtlMs);
+  return `${exp}.${sign(exp)}`;
+}
+function verifyToken(token) {
+  if (typeof token !== "string" || token.length > 200) return false;
+  const [exp, sig] = token.split(".");
+  if (!exp || !sig) return false;
+  const expMs = Number(exp);
+  if (!Number.isFinite(expMs) || expMs < Date.now()) return false;
+  const expected = Buffer.from(sign(exp));
+  const given = Buffer.from(sig);
+  return expected.length === given.length && crypto.timingSafeEqual(expected, given);
+}
+
+const loginAttempts = new Map(); // ip -> { count, resetAt }
+function clientIp(req) {
+  return req.headers["cf-connecting-ip"] || req.ip || "unknown";
+}
+function registerLoginAttempt(ip) {
+  const now = Date.now();
+  let entry = loginAttempts.get(ip);
+  if (!entry || entry.resetAt < now) {
+    entry = { count: 0, resetAt: now + cfg.loginWindowMs };
+    loginAttempts.set(ip, entry);
+  }
+  entry.count += 1;
+  return entry.count <= cfg.loginMaxAttempts;
+}
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, entry] of loginAttempts) if (entry.resetAt < now) loginAttempts.delete(ip);
+}, 60 * 1000).unref();
+
+// ---------------------------------------------------------------------------
+// HTTP API
+// ---------------------------------------------------------------------------
 const app = express();
-app.use(cors());
-app.use(express.json());
+app.set("trust proxy", true);
+app.use(cors({ origin: cfg.corsOrigin }));
+app.use(express.json({ limit: "10kb" }));
 
+app.get("/api/languages", (req, res) => {
+  res.set("Cache-Control", "public, max-age=3600");
+  res.json(req.query.isAdmin === "true" ? adminLanguages : listenerLanguages);
+});
+
+app.get("/api/health", (req, res) => {
+  const stats = listenerStats();
+  res.json({
+    ok: true,
+    uptimeSec: Math.round(process.uptime()),
+    listeners: stats.total,
+    streaming: Boolean(recognition),
+    finals: usage.finals,
+    translatedChars: usage.translatedChars,
+  });
+});
+
+app.post("/api/admin/login", (req, res) => {
+  const ip = clientIp(req);
+  if (!registerLoginAttempt(ip)) {
+    return res.status(429).json({ error: "Too many attempts. Try again in 15 minutes." });
+  }
+  const body = req.body || {};
+  const email = String(body.email || "").trim().toLowerCase();
+  const password = String(body.password || "");
+  const ok = safeEqual(email, cfg.adminEmail) && safeEqual(password, cfg.adminPassword);
+  if (!ok) return res.status(401).json({ error: "Invalid credentials" });
+  loginAttempts.delete(ip);
+  const token = issueToken();
+  console.log(`[auth] speaker login from ${ip}`);
+  res.json({ token, expiresAt: Number(token.split(".")[0]) });
+});
+
+// ---------------------------------------------------------------------------
+// Socket.io
+// ---------------------------------------------------------------------------
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*" } });
+const io = new Server(server, {
+  cors: { origin: cfg.corsOrigin },
+  serveClient: false,
+  maxHttpBufferSize: 1e6,
+  pingInterval: 25000,
+  pingTimeout: 20000,
+  perMessageDeflate: false,
+});
+
+const ROOM_PREFIX = "lang:";
+const roomFor = (code) => `${ROOM_PREFIX}${code}`;
 
 let adminSocket = null;
-const clients = new Map(); // socket -> { language: '' , textQueue: [], isProcessing: boolean}
-let recognizeStream = null;
-let isListeningPaused = false; // Track if listening is paused due to TTS
-let keepAliveInterval = null; // Keep-alive interval for Deepgram
+let recognition = null; // { conn, lang, model, open, keepAlive, finals }
+const pausingSockets = new Set(); // display sockets currently playing audio into the room
+let finalSeq = 0;
+const usage = { finals: 0, translatedChars: 0, translateCalls: 0, translateErrors: 0 };
+
+function isPaused() {
+  return pausingSockets.size > 0;
+}
+function setPause(socket, on) {
+  const before = isPaused();
+  if (on) pausingSockets.add(socket.id);
+  else pausingSockets.delete(socket.id);
+  const after = isPaused();
+  if (before !== after && adminSocket) adminSocket.emit(after ? "pause_recording" : "resume_recording");
+}
+
+// Languages that currently have at least one socket in their room (admin included, so the
+// speaker's own transcription panel is served too).
+function activeLanguages() {
+  const codes = [];
+  for (const [room, members] of io.sockets.adapter.rooms) {
+    if (room.startsWith(ROOM_PREFIX) && members.size > 0) codes.push(room.slice(ROOM_PREFIX.length));
+  }
+  return codes;
+}
+
+// Listener counts for the speaker's dashboard. The admin's own socket and the
+// presentation displays are not listeners; displays are reported separately.
+function listenerStats() {
+  const byLanguage = {};
+  let total = 0;
+  let displays = 0;
+  for (const s of io.sockets.sockets.values()) if (s.role === "display") displays += 1;
+  for (const [room, members] of io.sockets.adapter.rooms) {
+    if (!room.startsWith(ROOM_PREFIX)) continue;
+    let n = 0;
+    for (const id of members) {
+      const s = io.sockets.sockets.get(id);
+      if (s && !s.isAdmin && s.role !== "display") n += 1;
+    }
+    if (n > 0) {
+      byLanguage[room.slice(ROOM_PREFIX.length)] = n;
+      total += n;
+    }
+  }
+  return { total, displays, byLanguage };
+}
+
+// A listener follows one language; the presentation display follows several on one socket.
+const MAX_LANGUAGES_PER_SOCKET = 20;
+function setSocketLanguages(socket, codes) {
+  const list = Array.isArray(codes) ? codes : [codes];
+  const wanted = new Set(list.filter((c) => typeof c === "string" && listenerCodes.has(c)).slice(0, MAX_LANGUAGES_PER_SOCKET));
+  const current = socket.languages || new Set();
+  for (const code of current) if (!wanted.has(code)) socket.leave(roomFor(code));
+  for (const code of wanted) if (!current.has(code)) socket.join(roomFor(code));
+  socket.languages = wanted;
+  return wanted.size > 0;
+}
 
 io.on("connection", (socket) => {
-  socket.on("init:admin", () => {
+  socket.on("init:admin", (payload) => {
+    const token = payload && typeof payload === "object" ? payload.token : payload;
+    if (!verifyToken(token)) {
+      socket.emit("admin:unauthorized");
+      return;
+    }
+    if (adminSocket && adminSocket !== socket) {
+      adminSocket.isAdmin = false;
+      adminSocket.emit("admin:replaced");
+      stopRecognition();
+    }
     adminSocket = socket;
     socket.isAdmin = true;
+    socket.emit("admin:ready", { streaming: Boolean(recognition), paused: isPaused(), stats: listenerStats() });
   });
 
-  socket.on("init:client", ({ language }) => {
-    clients.set(socket.id, { language, textQueue: [], isProcessing: false });
+  socket.on("init:client", (payload) => {
+    const p = payload && typeof payload === "object" ? payload : {};
+    socket.role = p.role === "display" ? "display" : "listener";
+    setSocketLanguages(socket, p.languages !== undefined ? p.languages : p.language);
   });
 
-  socket.on("setLanguage", (language) => {
-    if (clients.has(socket.id)) {
-      clients.get(socket.id).language = language;
+  socket.on("setLanguage", (code) => {
+    setSocketLanguages(socket, code);
+  });
+
+  socket.on("setLanguages", (codes) => {
+    setSocketLanguages(socket, codes);
+  });
+
+  socket.on("start:admin", (payload) => {
+    if (!socket.isAdmin || socket !== adminSocket) return;
+    const lang = payload && typeof payload === "object" ? payload.adminLanguage : null;
+    if (!adminCodes.has(lang)) {
+      socket.emit("recognition:error", { message: `Unsupported speaking language: ${lang}` });
+      return;
     }
+    startRecognition(lang);
   });
 
   socket.on("stop:admin", () => {
-    if (socket.isAdmin) stopRecognitionStream();
+    if (socket === adminSocket) stopRecognition();
   });
 
-  socket.on("start:admin", ({ adminLanguage }) => {
-    if (socket.isAdmin) {
-      console.log(`Admin requested start with language: ${adminLanguage}`);
-      stopRecognitionStream(); // Ensure any previous stream is stopped
-      startRecognitionStream(adminLanguage);
+  socket.on("audio", (chunk) => {
+    if (socket !== adminSocket || !recognition || !recognition.open || isPaused()) return;
+    if (!chunk || !chunk.length || chunk.length > 262144) return;
+    try {
+      recognition.conn.send(chunk);
+    } catch (err) {
+      console.error("[deepgram] send failed:", err.message);
     }
   });
 
-  socket.on("audio", (audioChunk) => {
-    if (socket === adminSocket && recognizeStream && !isListeningPaused) {
-      recognizeStream.send(audioChunk);
-    }
-  });
-
-  socket.on("tts_send_text", (text, voiceModel, language) => {
-    const adminState = clients.get(socket.id);
-    if (adminState) {
-      adminState.textQueue.push(text);
-      processAdminTextQueue(socket.id, voiceModel, getVoiceLangCode(language)); // Continue processing or add to queue
-    }
-  });
-
-  socket.on("stop_tts_stream", () => {
-    console.log("Received stop_tts_stream from client.");
-    clients.delete(socket.id);
-  });
-
+  // Only the presentation display (which plays audio into the same room as the microphone)
+  // may pause the speaker. Remote listeners never do.
   socket.on("pause_listening", () => {
-    console.log("Received pause_listening request from socket:", socket.id);
-    isListeningPaused = true;
-    
-    // Notify admin to stop sending audio (if admin exists)
-    if (adminSocket) {
-      adminSocket.emit("pause_recording");
-    }
+    if (cfg.pauseFromDisplay && socket.role === "display") setPause(socket, true);
   });
-
   socket.on("resume_listening", () => {
-    console.log("Received resume_listening request from socket:", socket.id);
-    isListeningPaused = false;
-    
-    // Notify admin to resume sending audio
-    if (adminSocket) {
-      adminSocket.emit("resume_recording");
-    }
+    if (socket.role === "display") setPause(socket, false);
   });
 
   socket.on("disconnect", () => {
     if (socket === adminSocket) {
-      stopRecognitionStream();
       adminSocket = null;
-    } else {
-      clients.delete(socket.id);
+      stopRecognition();
     }
+    if (pausingSockets.has(socket.id)) setPause(socket, false);
   });
 });
 
-function startRecognitionStream(adminLang) {
-  console.log("Starting Deepgram stream with language:", adminLang);
-  recognizeStream = deepgram.listen.live({
-    model: adminLang == "en-US" ? "nova-3" : "nova-2",
-    language: adminLang,
-    smart_format: true,
-    interim_results: true, // Get interim results to keep connection alive
-    // filler_words: true,
-    // utterance_end_ms: 3000,
-    // endpointing: 100,
-  });
-  
-  recognizeStream.on(LiveTranscriptionEvents.Open, () => {
-    console.log("Deepgram connection opened successfully");
-    
-    // Send keep-alive every 8 seconds to prevent timeout
-    keepAliveInterval = setInterval(() => {
-      if (recognizeStream) {
-        try {
-          recognizeStream.keepAlive();
-          console.log("Sent keep-alive to Deepgram");
-        } catch (err) {
-          console.log("Keep-alive failed:", err.message);
-        }
+// Speaker dashboard stats.
+setInterval(() => {
+  if (adminSocket) adminSocket.emit("stats", listenerStats());
+}, 5000).unref();
+
+// Periodic usage line in the log.
+setInterval(() => {
+  const s = listenerStats();
+  console.log(
+    `[usage] listeners=${s.total} languages=${Object.keys(s.byLanguage).length} streaming=${Boolean(recognition)} ` +
+      `finals=${usage.finals} translateCalls=${usage.translateCalls} translatedChars=${usage.translatedChars} translateErrors=${usage.translateErrors}`
+  );
+}, 60 * 1000).unref();
+
+// ---------------------------------------------------------------------------
+// Deepgram live recognition (one stream for the single speaker)
+// ---------------------------------------------------------------------------
+function startRecognition(lang) {
+  stopRecognition();
+  const model = cfg.deepgramModel || (lang.startsWith("en") ? "nova-3" : "nova-2");
+  const options = { model, language: lang, smart_format: true, interim_results: true };
+  if (cfg.endpointingMs > 0) options.endpointing = cfg.endpointingMs;
+  const conn = deepgram.listen.live(options);
+  const rec = { conn, lang, model, open: false, keepAlive: null, finals: 0, startedAt: Date.now() };
+  recognition = rec;
+  console.log(`[deepgram] starting (${model}, ${lang})`);
+
+  conn.on(LiveTranscriptionEvents.Open, () => {
+    if (recognition !== rec) return;
+    rec.open = true;
+    rec.keepAlive = setInterval(() => {
+      try {
+        conn.keepAlive();
+      } catch (err) {
+        console.error("[deepgram] keep-alive failed:", err.message);
       }
     }, 8000);
-    
-    recognizeStream.on(LiveTranscriptionEvents.Transcript, (data) => {
-      const transcript = data.channel?.alternatives?.[0]?.transcript;
-      if (transcript) {
-        console.log("Transcript received:", transcript);
-        onSpeechData(
-          {
-            transcript,
-            isFinal: true,
-          },
-          adminLang
-        );
-      }
-    });
-    recognizeStream.on(LiveTranscriptionEvents.Close, (closeEvent) => {
-      console.log("Deepgram connection closed.", closeEvent);
-    });
-    recognizeStream.on(LiveTranscriptionEvents.Error, (error) => {
-      console.log("Deepgram error:", error);
-      stopRecognitionStream(); // Stop on error
-    });
+    console.log("[deepgram] open");
+    if (adminSocket) adminSocket.emit("recognition:open", { model, language: lang });
+  });
+
+  conn.on(LiveTranscriptionEvents.Transcript, (data) => {
+    if (recognition !== rec) return;
+    const text = data && data.channel && data.channel.alternatives && data.channel.alternatives[0]
+      ? data.channel.alternatives[0].transcript
+      : "";
+    if (!text || !text.trim()) return;
+    if (data.is_final) {
+      rec.finals += 1;
+      handleFinal(text.trim(), lang);
+    } else if (adminSocket) {
+      adminSocket.emit("transcript:interim", { text });
+    }
+  });
+
+  conn.on(LiveTranscriptionEvents.Error, (err) => {
+    console.error("[deepgram] error:", (err && err.message) || err);
+    if (recognition !== rec) return;
+    stopRecognition();
+    if (adminSocket) adminSocket.emit("recognition:error", { message: "Speech recognition error. Press Start Speaking again." });
+  });
+
+  conn.on(LiveTranscriptionEvents.Close, (event) => {
+    if (recognition !== rec) return;
+    const code = event && event.code;
+    const reason = event && event.reason;
+    console.log(`[deepgram] closed by remote (code ${code}${reason ? `, ${reason}` : ""})`);
+    stopRecognition();
+    if (adminSocket) adminSocket.emit("recognition:closed");
   });
 }
 
-async function processAdminTextQueue(socketId, voiceModel, language) {
-  const adminState = clients.get(socketId);
-  if (!adminState || adminState.isProcessing || adminState.textQueue.length === 0) {
-    return;
-  }
-
-  adminState.isProcessing = true;
-  const textToSynthesize = adminState.textQueue.shift(); // Get the next chunk of text
+function stopRecognition() {
+  const rec = recognition;
+  if (!rec) return;
+  recognition = null;
+  if (rec.keepAlive) clearInterval(rec.keepAlive);
   try {
-    const request = {
-      input: { text: textToSynthesize },
-      voice: { languageCode: language, name: voiceModel, ssmlGender: "FEMALE" }, // Use your preferred voice
-      audioConfig: { audioEncoding: "MP3" },
-    };
-    const [response] = await ttsClient.synthesizeSpeech(request);
-    const audioContent = response.audioContent; // This is a Buffer
-
-    io.to(socketId).emit("tts_audio_chunk", audioContent); // Send the audio data to socketId connected clients
-  } catch (error) {
-    console.error(`Error synthesizing speech for admin ${socketId}:`, error);
-    // Optionally notify the admin of the error
-    io.to(socketId).emit("admin:synthesisError", "Failed to synthesize speech chunk.");
-  } finally {
-    adminState.isProcessing = false;
-    // Process the next item in the queue recursively
-    if (adminState.textQueue.length > 0) {
-      processAdminTextQueue(socketId, voiceModel, language);
-    } else {
-      io.to(socketId).emit("admin:queueEmpty"); // Notify admin when queue is cleared
-    }
+    rec.conn.requestClose();
+  } catch (err) {
+    // already closed
   }
+  const secs = Math.round((Date.now() - rec.startedAt) / 1000);
+  console.log(`[deepgram] stopped after ${secs}s, ${rec.finals} final segments`);
 }
 
-function stopRecognitionStream() {
-  // Clear keep-alive interval
-  if (keepAliveInterval) {
-    clearInterval(keepAliveInterval);
-    keepAliveInterval = null;
+// ---------------------------------------------------------------------------
+// Translation: once per language per final segment, then broadcast to the language room.
+// ---------------------------------------------------------------------------
+function normalizeLang(code) {
+  if (!code) return code;
+  if (/^zh/i.test(code)) {
+    const c = code.toLowerCase();
+    return c === "zh-tw" || c === "zh-hant" || c === "zh-hk" ? "zh-TW" : "zh-CN";
   }
-  
-  if (!recognizeStream) return;
-  recognizeStream.requestClose();
-  recognizeStream = null;
+  const m = /^([a-z]{2,3})-[A-Z0-9]{2,3}$/.exec(code); // en-US, pt-BR, es-419 -> base language
+  if (m) return m[1];
+  return code; // fr, ms-Arab, mni-Mtei, pa-Arab stay as they are
 }
 
-async function translateText(text, targetLanguage, sourceLanguage) {
-  // Normalize language codes (e.g., "en-US" -> "en", "zh-CN" stays as "zh-CN")
-  const normalizeLanguageCode = (code) => {
-    // Keep Chinese variants as-is since they're distinct
-    if (code.startsWith('zh-')) return code;
-    // For others, extract base language code
-    return code.split('-')[0];
-  };
+const translateCache = new Map();
+const TRANSLATE_CACHE_MAX = 2000;
 
-  const normalizedTarget = normalizeLanguageCode(targetLanguage);
-  const normalizedSource = normalizeLanguageCode(sourceLanguage);
-
-  // Skip translation if source and target are the same
-  if (normalizedTarget === normalizedSource) {
-    return text;
-  }
-
-  console.log(`Translating from ${normalizedSource} to ${normalizedTarget}: "${text.substring(0, 50)}..."`);
-
-  try {
-    const [translationResponse] = await translateClient.translateText({
-      parent: `projects/${process.env.GOOGLE_PROJECT_ID}/locations/global`,
-      contents: [text],
-      mimeType: "text/plain",
-      sourceLanguageCode: normalizedSource,
-      targetLanguageCode: normalizedTarget,
-    });
-    const translatedText = translationResponse.translations[0].translatedText;
-    console.log(`Translation result: "${translatedText.substring(0, 50)}..."`);
-    return translatedText;
-  } catch (error) {
-    console.error(`Error translating text from ${sourceLanguage} to ${targetLanguage}:`, error.message);
-    return text; // Return original text if translation fails
-  }
+async function translate(text, target, source) {
+  if (text.length > cfg.maxTranslateChars) text = text.slice(0, cfg.maxTranslateChars);
+  const key = `${source}|${target}|${text}`;
+  const cached = translateCache.get(key);
+  if (cached !== undefined) return cached;
+  usage.translateCalls += 1;
+  usage.translatedChars += text.length;
+  const [response] = await translateClient.translateText({
+    parent: `projects/${cfg.googleProject}/locations/global`,
+    contents: [text],
+    mimeType: "text/plain",
+    sourceLanguageCode: source,
+    targetLanguageCode: target,
+  });
+  const out = (response.translations && response.translations[0] && response.translations[0].translatedText) || text;
+  translateCache.set(key, out);
+  if (translateCache.size > TRANSLATE_CACHE_MAX) translateCache.delete(translateCache.keys().next().value);
+  return out;
 }
 
-async function onSpeechData(data, adminLang) {
-  if (!data.transcript || isListeningPaused) {
-    return;
-  }
-  const text = data.transcript;
-  const isFinal = data.isFinal;
+async function handleFinal(text, sourceLang) {
+  const id = ++finalSeq;
+  const ts = Date.now();
+  usage.finals += 1;
+  if (adminSocket) adminSocket.emit("transcript:final", { id, text, language: sourceLang, ts });
 
-  try {
-    const translationPromises = [];
-    for (const [socketId, { language: clientLanguage }] of clients) {
-      translationPromises.push(
-        translateText(text, clientLanguage, adminLang)
-          .then((translatedText) => {
-            io.to(socketId).emit("transcript", { text: translatedText, isFinal, language: clientLanguage });
-          })
-          .catch((error) => {
-            // This catch is for errors in emitting or post-processing
-            console.error(`Error processing or emitting transcript for client ${socket.id}:`, error);
-          })
-      );
-    }
-    await Promise.all(translationPromises);
-  } catch (error) {
-    // This catch is mainly for programming errors in the setup of Promise.all
-    console.error("Error during parallel translation processing:", error);
-  }
-}
+  const languages = activeLanguages();
+  if (languages.length === 0) return;
+  const src = normalizeLang(sourceLang);
 
-// API routes for List of supported languages
-app.get("/api/languages", (req, res) => {
-  const supportedLanguages = JSON.parse(
-    fs.readFileSync(req.query.isAdmin === "true" ? "./static/admin_languages.json" : "./static/languages.json", "utf-8")
+  await Promise.all(
+    languages.map(async (code) => {
+      let out = text;
+      const tgt = normalizeLang(code);
+      if (tgt !== src) {
+        try {
+          out = await translate(text, tgt, src);
+        } catch (err) {
+          usage.translateErrors += 1;
+          console.error(`[translate] ${src}->${tgt} failed: ${err.message}`);
+        }
+      }
+      io.to(roomFor(code)).emit("transcript", { id, text: out, language: code, isFinal: true, ts });
+    })
   );
-  res.json(supportedLanguages);
+}
+
+// ---------------------------------------------------------------------------
+// Startup / shutdown
+// ---------------------------------------------------------------------------
+server.listen(cfg.port, cfg.host, () => {
+  console.log(`Server listening on ${cfg.host}:${cfg.port} (pauseFromDisplay=${cfg.pauseFromDisplay}, endpointing=${cfg.endpointingMs > 0 ? `${cfg.endpointingMs}ms` : "default"})`);
 });
 
-app.get("/api/voiceModelList", async (req, res) => {
-  try {
-    const langCode = getVoiceLangCode(req.query.language);
-    const response = await ttsClient.listVoices();
-    const list = filterVoices(response[0].voices, langCode);
-    res.json(list);
-  } catch (error) {
-    console.log(error);
-    res.status(405).send("Error" + String(error));
-  }
-});
-
-const PORT = process.env.PORT || 3001; // Fallback port
-server.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
+function shutdown(signal) {
+  console.log(`[server] ${signal} received, shutting down`);
+  stopRecognition();
+  io.close();
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 2000).unref();
+}
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));

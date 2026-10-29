@@ -1,39 +1,53 @@
 import { useEffect, useRef, useState, useCallback } from "react";
+import { useNavigate } from "react-router-dom";
 import { LiveAudioVisualizer } from "react-audio-visualize";
 import { AiFillAudio } from "react-icons/ai";
 import { io } from "socket.io-client";
 import Select from "react-select";
 import LanguageSelector from "./LanguageSelector";
 import AdminTranscription from "./AdminTranscription";
+import { WS_URL, SOCKET_OPTS } from "../utils/socket";
+import { getToken, clearToken } from "../utils/auth";
 
-const WS_URL = import.meta.env.VITE_APP_API_URL;
-const AUDIO_MIME_TYPE = "audio/webm"; // Consider "audio/webm;codecs=opus" for better quality/compression if supported
-const RECORDER_TIMESLICE_MS = 250; // Send audio data every 250ms
-const START_RECORDING_DELAY_MS = 1000; // Delay before starting media stream to allow server setup
+const RECORDER_TIMESLICE_MS = 250; // send audio every 250ms
+const RECOGNITION_OPEN_TIMEOUT_MS = 4000; // start the recorder anyway if the server is slow to confirm
 
-// 1. Define the MIME types you’d like to try, in order:
 const MIME_TYPES = [
-  "audio/webm;codecs=opus", // best for Chrome/Firefox
-  "audio/webm", // simpler WebM fallback
-  "audio/mp4;codecs=mp4a.40.2", // Safari’s preferred AAC-in-MP4
-  "audio/mp4", // plain MP4 fallback
+  "audio/webm;codecs=opus", // Chrome / Firefox
+  "audio/webm",
+  "audio/mp4;codecs=mp4a.40.2", // Safari
+  "audio/mp4",
 ];
-
 const supportedMimeType = MIME_TYPES.find((t) => MediaRecorder.isTypeSupported(t));
 
-const delay = (delayInms) => new Promise((resolve) => setTimeout(resolve, delayInms));
+function formatStats(stats) {
+  const entries = Object.entries(stats.byLanguage || {}).sort((a, b) => b[1] - a[1]);
+  const top = entries.slice(0, 6).map(([code, n]) => `${code} ${n}`);
+  const rest = entries.length - top.length;
+  return top.join(" · ") + (rest > 0 ? ` · +${rest} more` : "");
+}
 
 function AdminPanel({ isRecording, setIsRecording }) {
+  const navigate = useNavigate();
   const [mics, setMics] = useState([]);
   const [selectedMic, setSelectedMic] = useState(null);
   const [isConnected, setIsConnected] = useState(false);
+  const [socketReady, setSocketReady] = useState(false);
   const [error, setError] = useState(null);
+  const [notice, setNotice] = useState(null);
+  const [stats, setStats] = useState({ total: 0, byLanguage: {} });
   const [selectedAdminLanguage, setSelectedAdminLanguage] = useState("en-US");
 
   const mediaStreamRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const socketRef = useRef(null);
   const isPausedRef = useRef(false);
+  const isRecordingRef = useRef(isRecording);
+  const recognitionOpenResolver = useRef(null);
+
+  useEffect(() => {
+    isRecordingRef.current = isRecording;
+  }, [isRecording]);
 
   useEffect(() => {
     async function fetchMics() {
@@ -43,9 +57,9 @@ function AdminPanel({ isRecording, setIsRecording }) {
         const devices = await navigator.mediaDevices.enumerateDevices();
         const audioInputs = devices.filter((d) => d.kind === "audioinput");
         setMics(audioInputs);
-        if (audioInputs.length > 0 && !selectedMic) {
-          setSelectedMic(audioInputs[0].deviceId);
-        } else if (audioInputs.length === 0) {
+        if (audioInputs.length > 0) {
+          setSelectedMic((current) => current || audioInputs[0].deviceId);
+        } else {
           setError("No microphones found. Please connect a microphone and grant permission.");
         }
       } catch (err) {
@@ -61,141 +75,130 @@ function AdminPanel({ isRecording, setIsRecording }) {
       mediaRecorderRef.current?.stop();
       mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
       mediaStreamRef.current = null;
+      mediaRecorderRef.current = null;
       if (emitStopToServer && socketRef.current?.connected) {
         socketRef.current.emit("stop:admin");
       }
-      mediaRecorderRef.current = null;
       setIsRecording(false);
-      console.log("Recording stopped");
     },
     [setIsRecording]
   );
 
   useEffect(() => {
     if (!WS_URL) {
-      console.error("WebSocket URL (VITE_APP_API_URL) is not defined.");
-      setError("Configuration error: WebSocket URL is missing.");
-      return;
+      setError("Configuration error: server URL (VITE_APP_API_URL) is missing.");
+      return undefined;
     }
 
-    let currentSocket = io(WS_URL);
-    socketRef.current = currentSocket;
+    const socket = io(WS_URL, SOCKET_OPTS);
+    socketRef.current = socket;
 
-    const handleConnect = () => {
-      console.log("Socket connected");
-      setIsConnected(true);
-      setError(null);
-      currentSocket?.emit("init:admin");
+    const handlers = {
+      connect: () => {
+        setIsConnected(true);
+        setError(null);
+        socket.emit("init:admin", { token: getToken() });
+      },
+      disconnect: (reason) => {
+        setIsConnected(false);
+        if (reason !== "io client disconnect") setError("Connection lost. Reconnecting...");
+        if (isRecordingRef.current) stopRecording(false);
+      },
+      connect_error: (err) => {
+        setIsConnected(false);
+        setError(`Failed to connect to the server: ${err.message}`);
+      },
+      "admin:unauthorized": () => {
+        clearToken();
+        socket.disconnect();
+        navigate("/admin-login", { replace: true });
+      },
+      "admin:replaced": () => {
+        if (isRecordingRef.current) stopRecording(false);
+        setNotice("Another speaker session took over this microphone. Reload this page to take it back.");
+      },
+      "admin:ready": (payload) => {
+        if (payload?.stats) setStats(payload.stats);
+      },
+      "recognition:open": () => {
+        if (recognitionOpenResolver.current) {
+          recognitionOpenResolver.current();
+          recognitionOpenResolver.current = null;
+        }
+      },
+      "recognition:closed": () => {
+        if (isRecordingRef.current) {
+          stopRecording(false);
+          setError("Speech recognition stopped. Press Start Speaking again.");
+        }
+      },
+      "recognition:error": (payload) => {
+        if (isRecordingRef.current) stopRecording(false);
+        setError(payload?.message || "Speech recognition error.");
+      },
+      stats: (payload) => setStats(payload),
+      pause_recording: () => {
+        isPausedRef.current = true;
+        mediaStreamRef.current?.getTracks().forEach((track) => (track.enabled = false));
+      },
+      resume_recording: () => {
+        isPausedRef.current = false;
+        mediaStreamRef.current?.getTracks().forEach((track) => (track.enabled = true));
+      },
     };
 
-    const handleDisconnect = (reason) => {
-      console.log("Socket disconnected:", reason);
-      setIsConnected(false);
-      if (reason !== "io client disconnect") {
-        setError("Connection lost. Attempting to reconnect...");
-      }
-      if (isRecording) {
-        stopRecording(false);
-      }
-    };
-
-    const handleConnectError = (err) => {
-      console.error("Socket connection error:", err);
-      setIsConnected(false);
-      setError(`Failed to connect to the server: ${err.message}`);
-    };
-
-    const handlePauseRecording = () => {
-      console.log("Received pause_recording from server - stopping microphone");
-      isPausedRef.current = true;
-      
-      // Stop all audio tracks to disable the microphone
-      if (mediaStreamRef.current) {
-        mediaStreamRef.current.getTracks().forEach((track) => {
-          track.enabled = false;
-          console.log("Disabled audio track:", track.label);
-        });
-      }
-    };
-
-    const handleResumeRecording = () => {
-      console.log("Received resume_recording from server - enabling microphone");
-      isPausedRef.current = false;
-      
-      // Re-enable all audio tracks
-      if (mediaStreamRef.current) {
-        mediaStreamRef.current.getTracks().forEach((track) => {
-          track.enabled = true;
-          console.log("Enabled audio track:", track.label);
-        });
-      }
-    };
-
-    currentSocket.on("connect", handleConnect);
-    currentSocket.on("disconnect", handleDisconnect);
-    currentSocket.on("connect_error", handleConnectError);
-    currentSocket.on("pause_recording", handlePauseRecording);
-    currentSocket.on("resume_recording", handleResumeRecording);
+    for (const [event, handler] of Object.entries(handlers)) socket.on(event, handler);
+    setSocketReady(true);
 
     return () => {
-      console.log("Disconnecting socket");
-      currentSocket.off("connect", handleConnect);
-      currentSocket.off("disconnect", handleDisconnect);
-      currentSocket.off("connect_error", handleConnectError);
-      currentSocket.off("pause_recording", handlePauseRecording);
-      currentSocket.off("resume_recording", handleResumeRecording);
-      currentSocket.disconnect();
+      for (const [event, handler] of Object.entries(handlers)) socket.off(event, handler);
+      socket.disconnect();
       socketRef.current = null;
+      setSocketReady(false);
     };
-  }, [WS_URL, stopRecording]);
+  }, [stopRecording, navigate]);
 
   const startRecording = useCallback(async () => {
-    if (!selectedMic || !socketRef.current?.connected) {
+    const socket = socketRef.current;
+    if (!selectedMic || !socket?.connected) {
       setError("Cannot start recording. Check microphone selection and connection status.");
       return;
     }
-
     setError(null);
-    console.log("Attempting to start recording...");
+    setNotice(null);
 
     try {
-      socketRef.current.emit("start:admin", { adminLanguage: selectedAdminLanguage });
-      await delay(START_RECORDING_DELAY_MS);
-
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: { deviceId: selectedMic, noiseSuppression: true, echoCancellation: true },
       });
       mediaStreamRef.current = stream;
 
+      // Ask the server to open recognition and wait until it confirms, so the first words are not lost.
+      const opened = new Promise((resolve) => {
+        recognitionOpenResolver.current = resolve;
+        setTimeout(resolve, RECOGNITION_OPEN_TIMEOUT_MS);
+      });
+      socket.emit("start:admin", { adminLanguage: selectedAdminLanguage });
+      await opened;
+
       const recorder = new MediaRecorder(stream, { mimeType: supportedMimeType });
       mediaRecorderRef.current = recorder;
 
       recorder.ondataavailable = (event) => {
-        if (event.data.size > 0 && socketRef.current?.connected && !isPausedRef.current) {
-          socketRef.current.emit("audio", event.data);
-        } else if (!socketRef.current?.connected) {
-          console.warn("Socket disconnected during recording.");
+        if (event.data.size === 0) return;
+        if (!socketRef.current?.connected) {
           stopRecording(false);
-        } else if (isPausedRef.current) {
-          console.log("Skipping audio chunk - recording is paused");
+          return;
         }
+        if (!isPausedRef.current) socketRef.current.emit("audio", event.data);
       };
-
-      recorder.onstart = () => {
-        console.log("MediaRecorder started");
-        setIsRecording(true);
-      };
-
+      recorder.onstart = () => setIsRecording(true);
       recorder.onstop = () => {
-        console.log("MediaRecorder stopped.");
-        // Ensure stream tracks are stopped even if stop called unexpectedly
         mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
         mediaStreamRef.current = null;
       };
-
       recorder.onerror = (event) => {
         const recorderError = event.error || new Error("Unknown MediaRecorder error");
-        console.error("MediaRecorder error:", recorderError);
         setError(`Recording error: ${recorderError.message || recorderError.name}`);
         stopRecording();
       };
@@ -212,22 +215,23 @@ function AdminPanel({ isRecording, setIsRecording }) {
 
   useEffect(() => {
     return () => {
-      if (isRecording) {
-        console.log("Component unmounting while recording, stopping recording.");
-        stopRecording(!socketRef.current?.connected);
-      }
+      if (isRecordingRef.current) stopRecording(true);
     };
-  }, [isRecording, stopRecording]);
+  }, [stopRecording]);
 
   return (
     <div>
       <div className="card shadow-sm mb-4">
-        <div className="card-header bg-white py-3 d-flex justify-content-between align-items-center">
+        <div className="card-header bg-white py-3 d-flex justify-content-between align-items-center flex-wrap gap-2">
           <h3 className="h5 mb-0 text-primary d-inline-flex align-items-center">
             <i className="bi bi-mic-fill me-2"></i>
             Speaker Controls
           </h3>
-          <div className="d-flex gap-2 align-items-center">
+          <div className="d-flex gap-2 align-items-center flex-wrap">
+            <span className="badge bg-secondary" title={formatStats(stats) || "No listeners yet"}>
+              <i className="bi bi-people-fill me-1"></i>
+              {stats.total} listening
+            </span>
             <button
               className="btn btn-outline-primary btn-sm"
               onClick={() => window.open("/presentation-display", "_blank")}
@@ -248,6 +252,19 @@ function AdminPanel({ isRecording, setIsRecording }) {
               {error}
             </div>
           )}
+          {notice && (
+            <div className="alert alert-warning" role="alert">
+              <i className="bi bi-info-circle-fill me-2"></i>
+              {notice}
+            </div>
+          )}
+          {(stats.total > 0 || stats.displays > 0) && (
+            <div className="text-muted small mb-3">
+              {stats.total > 0 ? `Listeners by language: ${formatStats(stats)}` : "No listeners yet"}
+              {stats.displays > 0 ? ` · ${stats.displays} presentation display${stats.displays > 1 ? "s" : ""} connected` : ""}
+            </div>
+          )}
+
           <div className="row g-3 mb-3">
             <div className="col-md-4">
               <div className="form-group">
@@ -257,9 +274,13 @@ function AdminPanel({ isRecording, setIsRecording }) {
                 </label>
                 <Select
                   className="form-select-lg"
-                  value={mics.find((item) => item.deviceId == selectedMic) || ""}
-                  onChange={(e) => setSelectedMic(e.value)}
-                  disabled={isRecording || mics.length === 0}
+                  value={
+                    mics
+                      .map((mic) => ({ label: mic.label || `Microphone ${mic.deviceId?.substring(0, 6)}...`, value: mic.deviceId }))
+                      .find((item) => item.value === selectedMic) || null
+                  }
+                  onChange={(item) => setSelectedMic(item.value)}
+                  isDisabled={isRecording || mics.length === 0}
                   isSearchable
                   options={
                     mics.length === 0
@@ -305,27 +326,25 @@ function AdminPanel({ isRecording, setIsRecording }) {
                 Live Audio Feed
               </h5>
               <div className="w-100 d-flex align-items-center justify-content-center">
-                {mediaRecorderRef.current && (
-                  <LiveAudioVisualizer
-                    mediaRecorder={mediaRecorderRef.current}
-                    width="100%"
-                    height={75}
-                    barWidth={3}
-                    gap={2}
-                    backgroundColor="transparent"
-                    barColor="#467efc"
-                    fftSize={512}
-                    maxDecibels={-10}
-                    minDecibels={-80}
-                    smoothingTimeConstant={0.4}
-                  />
-                )}
+                <LiveAudioVisualizer
+                  mediaRecorder={mediaRecorderRef.current}
+                  width="100%"
+                  height={75}
+                  barWidth={3}
+                  gap={2}
+                  backgroundColor="transparent"
+                  barColor="#467efc"
+                  fftSize={512}
+                  maxDecibels={-10}
+                  minDecibels={-80}
+                  smoothingTimeConstant={0.4}
+                />
               </div>
             </div>
           )}
         </div>
       </div>
-      {socketRef.current && <AdminTranscription socketRef={socketRef} />}
+      {socketReady && <AdminTranscription socketRef={socketRef} />}
     </div>
   );
 }

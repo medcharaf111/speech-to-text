@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { MdEmail, MdError, MdLock } from "react-icons/md";
 import { useNavigate } from "react-router-dom";
+import { adminLogin } from "../utils/api";
+import { isAuthenticated, setToken } from "../utils/auth";
 
 const AdminLogin = () => {
   const [email, setEmail] = useState("");
@@ -10,29 +12,21 @@ const AdminLogin = () => {
   const navigate = useNavigate();
 
   useEffect(() => {
-    const isAuthenticated = localStorage.getItem("adminAuthenticated") === "true";
-    if (isAuthenticated) {
-      navigate("/speechToAdmin");
-    }
-  }, []);
+    if (isAuthenticated()) navigate("/speechToAdmin", { replace: true });
+  }, [navigate]);
 
-  const handleLogin = (e) => {
+  const handleLogin = async (e) => {
     e.preventDefault();
     setLoading(true);
     setError("");
-
-    // Simulate 1 second loading
-    setTimeout(() => {
-      // Check against static credentials
-      if (email === import.meta.env.VITE_ADMIN_EMAIL && password === import.meta.env.VITE_ADMIN_PASSWORD) {
-        // Set authenticated flag in localStorage
-        localStorage.setItem("adminAuthenticated", "true");
-        navigate("/speechToAdmin");
-      } else {
-        setError("Invalid credentials. Please try again.");
-        setLoading(false);
-      }
-    }, 1000);
+    try {
+      const { token } = await adminLogin(email, password);
+      setToken(token);
+      navigate("/speechToAdmin", { replace: true });
+    } catch (err) {
+      setError(err.message);
+      setLoading(false);
+    }
   };
 
   return (
@@ -41,13 +35,13 @@ const AdminLogin = () => {
         <div className="card-body p-4 p-md-5">
           <div className="text-center mb-4">
             <h1 className="fw-bold text-primary mb-2" style={{ fontSize: "1.75rem" }}>
-              Admin Portal
+              Speaker Login
             </h1>
-            <p className="text-muted">Enter Admin credentials to continue</p>
+            <p className="text-muted">Enter the speaker credentials to continue</p>
           </div>
 
           {error && (
-            <div className="alert alert-danger d-flex align-items-center" role="alert">
+            <div className="alert alert-danger d-flex align-items-center gap-2" role="alert">
               <MdError />
               {error}
             </div>
@@ -66,9 +60,10 @@ const AdminLogin = () => {
                   type="email"
                   className="form-control border-start-0"
                   id="email"
-                  placeholder="Enter admin email"
+                  placeholder="Enter speaker email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
+                  autoComplete="username"
                   required
                   disabled={loading}
                 />
@@ -76,11 +71,9 @@ const AdminLogin = () => {
             </div>
 
             <div className="mb-4">
-              <div className="d-flex justify-content-between">
-                <label htmlFor="password" className="form-label fw-semibold">
-                  Password
-                </label>
-              </div>
+              <label htmlFor="password" className="form-label fw-semibold">
+                Password
+              </label>
               <div className="input-group">
                 <span className="input-group-text bg-light border-end-0">
                   <MdLock />
@@ -89,9 +82,10 @@ const AdminLogin = () => {
                   type="password"
                   className="form-control border-start-0"
                   id="password"
-                  placeholder="Enter admin password"
+                  placeholder="Enter speaker password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
+                  autoComplete="current-password"
                   required
                   disabled={loading}
                 />

@@ -1,952 +1,395 @@
-import { useEffect, useState, useRef } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { io } from "socket.io-client";
-import { fetchLanguages } from "../utils/api";
 import Select from "react-select";
+import { fetchLanguages } from "../utils/api";
+import { WS_URL, SOCKET_OPTS } from "../utils/socket";
+import { createDeviceSpeaker } from "../utils/deviceSpeech";
+import { selectStyles } from "../utils/selectStyles";
 
-const WS_URL = import.meta.env.VITE_APP_API_URL;
+const PREFS_KEY = "seamo.stage";
+const BUFFER_CHARS = 600; // rolling history kept per language
+const SPEAK_CHARS = 300; // how much of the tail "Speak" reads out
+const LINE_HEIGHT = 1.18; // must match .panel__text
+const HIDE_CONTROLS_AFTER_MS = 3000;
+const SCALE_MIN = 0.5;
+const SCALE_MAX = 2.5;
+
+const loadPrefs = () => {
+  try {
+    return JSON.parse(localStorage.getItem(PREFS_KEY)) || {};
+  } catch {
+    return {};
+  }
+};
+const savePrefs = (prefs) => {
+  try {
+    localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+  } catch {
+    // ignore
+  }
+};
+
+const isCJK = (code) => /^(zh|ja|ko)/.test(code);
+
+// Biggest font that still shows the whole latest sentence in a panel of the given size, bounded by a
+// geometric maximum (about 18 characters per line at least). `scale` is the manual A−/A+ multiplier.
+// Capacity is how many characters fit at the chosen size; the panel shows the newest text that fits,
+// so smaller text means more history on screen.
+function fitPanel(width, height, cjk, scale, needed) {
+  if (!width || !height) return { fontSize: 40, capacity: 120 };
+  const avgCharWidth = cjk ? 1.0 : 0.6; // em; Lexend is a wide face
+  const usableW = Math.max(120, width - 48);
+  const usableH = Math.max(60, height - 64);
+  const charsPerLine = (s) => Math.max(1, Math.floor(usableW / (s * avgCharWidth)));
+  const linesAvailable = (s) => Math.max(1, Math.floor(usableH / (s * LINE_HEIGHT) + 0.05));
+  const targetLines = Math.min(5, Math.max(2, Math.round((usableH / usableW) * 6)));
+  const geometricMax = Math.max(16, Math.min(usableH / (targetLines * LINE_HEIGHT), usableW / (18 * avgCharWidth), 360));
+  let sentenceFit = geometricMax;
+  if (needed > 0) {
+    const fits = (s) => charsPerLine(s) * linesAvailable(s) >= needed;
+    if (!fits(16)) sentenceFit = 16;
+    else {
+      let lo = 16;
+      let hi = geometricMax;
+      for (let i = 0; i < 14; i++) {
+        const mid = (lo + hi) / 2;
+        if (fits(mid)) lo = mid;
+        else hi = mid;
+      }
+      sentenceFit = lo;
+    }
+  }
+  // A−/A+ scale the geometric size; the latest sentence is never cut, so A+ stops at the sentence fit.
+  const requested = Math.min(400, geometricMax * scale);
+  const fontSize = Math.max(16, Math.min(requested, sentenceFit));
+  return { fontSize, capacity: charsPerLine(fontSize) * linesAvailable(fontSize), capped: requested > sentenceFit + 0.5 };
+}
+
+// Newest `capacity` characters of the text, starting on a word boundary but never after the start of
+// the latest sentence, so that sentence stays complete whenever it fits.
+function tailOf(text, capacity, cjk, latest = "") {
+  if (!text) return "";
+  if (text.length <= capacity) return text;
+  const latestStart = latest && text.endsWith(latest) ? text.length - latest.length : text.length;
+  let start = Math.max(0, text.length - capacity);
+  if (!cjk && start > 0) {
+    const space = text.indexOf(" ", start);
+    if (space !== -1 && space + 1 < text.length) {
+      const boundary = space + 1;
+      // when the latest sentence fits, never advance past its first character
+      start = start <= latestStart ? Math.min(boundary, latestStart) : boundary;
+    }
+  }
+  return text.slice(start);
+}
 
 function PresentationDisplay() {
-  const [availableLanguages, setAvailableLanguages] = useState([]);
-  const [selectedLanguages, setSelectedLanguages] = useState([]);
-  const [transcripts, setTranscripts] = useState({}); // { languageCode: "transcript text" }
-  const [isConnected, setIsConnected] = useState(false);
-  const [isSpeaking, setIsSpeaking] = useState(false);
-  const [currentSpeakingLanguage, setCurrentSpeakingLanguage] = useState(null);
-  const [fontSize, setFontSize] = useState(1.5); // Base font size in rem (1.5rem default)
-  const fontSizeRef = useRef(fontSize); // Ref to access current fontSize in socket handlers
-  const languageSocketsRef = useRef({}); // { languageCode: socketInstance }
-  const speechSynthesisRef = useRef(null);
+  const prefs = useRef(loadPrefs());
+  const [available, setAvailable] = useState([]);
+  const [selected, setSelected] = useState([]); // [{ code, name }]
+  const [buffers, setBuffers] = useState({}); // code -> rolling text
+  const [versions, setVersions] = useState({}); // code -> id of the newest sentence (re-triggers the entrance animation)
+  const [latest, setLatest] = useState({}); // code -> newest sentence, which the fit always keeps fully visible
+  const [sizes, setSizes] = useState({}); // code -> { w, h }
+  const [scale, setScale] = useState(prefs.current.scale || 1);
+  const [theme, setTheme] = useState(prefs.current.theme === "light" ? "light" : "dark");
+  const [connected, setConnected] = useState(false);
+  const [fullscreen, setFullscreen] = useState(false);
+  const [controlsVisible, setControlsVisible] = useState(true);
+  const [speaking, setSpeaking] = useState({ active: false, lang: null });
 
-  // Keep fontSizeRef in sync with fontSize state
+  const socketRef = useRef(null);
+  const speakerRef = useRef(null);
+  const speakingRef = useRef(false);
+  const selectedRef = useRef([]);
+  const buffersRef = useRef({});
+  const panelEls = useRef(new Map());
+  const observerRef = useRef(null);
+  const hideTimer = useRef(null);
+  const restored = useRef(false);
+
+  const codes = useMemo(() => selected.map((l) => l.code), [selected]);
   useEffect(() => {
-    fontSizeRef.current = fontSize;
-  }, [fontSize]);
-
-  // CJK language detection helper
-  const isCJKLanguage = (langCode) => {
-    const cjkCodes = ['zh', 'ja', 'ko', 'zh-CN', 'zh-TW', 'zh-HK', 'ja-JP', 'ko-KR'];
-    return cjkCodes.some(code => langCode.startsWith(code) || langCode === code);
-  };
-
-  // Get max units (words or characters) based on font size and language
-  const getMaxUnits = (currentFontSize, isCJK) => {
-    if (isCJK) {
-      // Character-based limit for CJK
-      if (currentFontSize >= 3.5) return 15;
-      else if (currentFontSize >= 3) return 20;
-      else if (currentFontSize >= 2.5) return 25;
-      else if (currentFontSize >= 2) return 35;
-      else if (currentFontSize >= 1.5) return 45;
-      else return 60;
-    } else {
-      // Word-based limit for other languages
-      if (currentFontSize >= 3.5) return 6;
-      else if (currentFontSize >= 3) return 8;
-      else if (currentFontSize >= 2.5) return 10;
-      else if (currentFontSize >= 2) return 12;
-      else if (currentFontSize >= 1.5) return 15;
-      else return 20;
-    }
-  };
-
-  // Truncate text based on font size and language type
-  const truncateText = (text, langCode, currentFontSize) => {
-    if (!text) return '';
-    
-    const isCJK = isCJKLanguage(langCode);
-    const maxUnits = getMaxUnits(currentFontSize, isCJK);
-    
-    if (isCJK) {
-      // Character-based truncation for CJK
-      return text.length > maxUnits ? text.slice(-maxUnits) : text;
-    } else {
-      // Word-based truncation for other languages
-      const words = text.split(/\s+/);
-      return words.length > maxUnits ? words.slice(-maxUnits).join(' ') : text;
-    }
-  };
-
-  // Re-truncate existing transcripts when font size changes
+    selectedRef.current = codes;
+  }, [codes]);
   useEffect(() => {
-    setTranscripts((prev) => {
-      const updated = {};
-      Object.keys(prev).forEach((langCode) => {
-        updated[langCode] = truncateText(prev[langCode], langCode, fontSize);
-      });
-      return updated;
-    });
-  }, [fontSize]);
-
+    buffersRef.current = buffers;
+  }, [buffers]);
   useEffect(() => {
-    // Fetch available languages
+    savePrefs({ codes, scale, theme });
+  }, [codes, scale, theme]);
+
+  // Language list, then restore the last selection.
+  useEffect(() => {
     fetchLanguages(false)
-      .then((langs) => setAvailableLanguages(langs))
+      .then((langs) => {
+        setAvailable(langs);
+        if (!restored.current) {
+          restored.current = true;
+          const wanted = prefs.current.codes || [];
+          setSelected(langs.filter((l) => wanted.includes(l.code)));
+        }
+      })
       .catch((err) => console.error("Error fetching languages:", err));
+  }, []);
 
+  // Device voice for "Speak". While it plays into the room, the speaker's mic is paused server-side.
+  useEffect(() => {
+    const speaker = createDeviceSpeaker({ maxBacklog: 30, rate: 0.95 });
+    speakerRef.current = speaker;
+    const unsubscribe = speaker.subscribe((state) => {
+      const active = state.speaking || state.backlog > 0;
+      setSpeaking({ active, lang: state.lang || null });
+      if (speakingRef.current && !active) socketRef.current?.emit("resume_listening");
+      speakingRef.current = active;
+    });
     return () => {
-      // Clean up all sockets on unmount
-      Object.values(languageSocketsRef.current).forEach((socket) => {
-        socket.disconnect();
-      });
+      unsubscribe();
+      speaker.cancel();
     };
   }, []);
 
+  // One socket for all displayed languages.
   useEffect(() => {
-    if (!WS_URL) {
-      console.error("WebSocket URL (VITE_APP_API_URL) is not defined.");
-      return;
-    }
-
-    // Add new language sockets
-    selectedLanguages.forEach((lang) => {
-      const langCode = lang.code;
-
-      if (!languageSocketsRef.current[langCode]) {
-        console.log(`Creating socket for language: ${langCode}`);
-        
-        // Create a new socket for this language
-        const socket = io(WS_URL);
-        languageSocketsRef.current[langCode] = socket;
-
-        socket.on("connect", () => {
-          console.log(`Socket connected for ${langCode}`);
-          setIsConnected(true);
-          // Initialize this socket as a client for this language
-          socket.emit("init:client", { language: langCode });
-        });
-
-        socket.on("disconnect", () => {
-          console.log(`Socket disconnected for ${langCode}`);
-          // Check if any sockets are still connected
-          const anyConnected = Object.values(languageSocketsRef.current).some(
-            (s) => s.connected
-          );
-          setIsConnected(anyConnected);
-        });
-
-        socket.on("transcript", ({ text, isFinal, language }) => {
-          if (language === langCode && isFinal) {
-            setTranscripts((prev) => {
-              const newText = text.trim();
-              const currentText = prev[langCode] || '';
-              
-              // Combine with existing text (handle CJK without space)
-              const isCJK = isCJKLanguage(langCode);
-              const combinedText = currentText 
-                ? (isCJK ? `${currentText}${newText}` : `${currentText} ${newText}`)
-                : newText;
-              
-              // Truncate based on current font size and language type
-              const currentFontSize = fontSizeRef.current;
-              const truncatedText = truncateText(combinedText, langCode, currentFontSize);
-              
-              return {
-                ...prev,
-                [langCode]: truncatedText,
-              };
-            });
-          }
-        });
-      }
+    const socket = io(WS_URL, SOCKET_OPTS);
+    socketRef.current = socket;
+    socket.on("connect", () => {
+      setConnected(true);
+      socket.emit("init:client", { languages: selectedRef.current, role: "display" });
     });
-
-    // Remove sockets for deselected languages
-    Object.keys(languageSocketsRef.current).forEach((langCode) => {
-      if (!selectedLanguages.find((lang) => lang.code === langCode)) {
-        console.log(`Removing socket for language: ${langCode}`);
-        const socket = languageSocketsRef.current[langCode];
-        socket.disconnect();
-        delete languageSocketsRef.current[langCode];
-        
-        // Remove transcript
-        setTranscripts((prev) => {
-          const updated = { ...prev };
-          delete updated[langCode];
-          return updated;
-        });
-      }
+    socket.on("disconnect", () => setConnected(false));
+    socket.on("transcript", ({ id, text, language }) => {
+      if (!text || !selectedRef.current.includes(language)) return;
+      setBuffers((prev) => {
+        const joined = prev[language] ? (isCJK(language) ? prev[language] + text : `${prev[language]} ${text}`) : text;
+        return { ...prev, [language]: joined.length > BUFFER_CHARS ? joined.slice(-BUFFER_CHARS) : joined };
+      });
+      setVersions((prev) => ({ ...prev, [language]: id }));
+      setLatest((prev) => ({ ...prev, [language]: text }));
     });
-
-    // Update connection status
-    const anyConnected = Object.values(languageSocketsRef.current).some(
-      (s) => s.connected
-    );
-    setIsConnected(anyConnected);
-  }, [selectedLanguages]);
-
-  const handleLanguageChange = (selectedOptions) => {
-    setSelectedLanguages(selectedOptions || []);
-  };
-
-  const clearTranscripts = () => {
-    setTranscripts({});
-  };
-
-  // Text-to-Speech functionality
-  const getLanguageVoice = (languageCode) => {
-    const voices = window.speechSynthesis.getVoices();
-    
-    // Map language codes to voice language codes
-    const voiceMap = {
-      'en': 'en-US',
-      'ar': 'ar-SA',
-      'fr': 'fr-FR',
-      'es': 'es-ES',
-      'de': 'de-DE',
-      'it': 'it-IT',
-      'pt': 'pt-PT',
-      'ru': 'ru-RU',
-      'zh': 'zh-CN',
-      'ja': 'ja-JP',
-      'ko': 'ko-KR',
-      'hi': 'hi-IN',
-      'tr': 'tr-TR',
-      'nl': 'nl-NL',
-      'pl': 'pl-PL',
-      'sv': 'sv-SE',
-      'da': 'da-DK',
-      'no': 'nb-NO',
-      'fi': 'fi-FI',
-      'cs': 'cs-CZ',
-      'hu': 'hu-HU',
-      'ro': 'ro-RO',
-      'th': 'th-TH',
-      'vi': 'vi-VN',
-      'id': 'id-ID',
-      'ms': 'ms-MY',
-      'uk': 'uk-UA',
-      'el': 'el-GR',
-      'he': 'he-IL',
-      'bn': 'bn-IN',
-      'ta': 'ta-IN',
-      'te': 'te-IN',
-      'mr': 'mr-IN',
-      'gu': 'gu-IN',
-      'kn': 'kn-IN',
-      'ml': 'ml-IN',
-      'pa': 'pa-IN',
-      'ur': 'ur-PK',
-      'fa': 'fa-IR',
-      'af': 'af-ZA',
-      'sq': 'sq-AL',
-      'am': 'am-ET',
-      'hy': 'hy-AM',
-      'az': 'az-AZ',
-      'eu': 'eu-ES',
-      'be': 'be-BY',
-      'bs': 'bs-BA',
-      'bg': 'bg-BG',
-      'ca': 'ca-ES',
-      'hr': 'hr-HR',
-      'et': 'et-EE',
-      'fil': 'fil-PH',
-      'gl': 'gl-ES',
-      'ka': 'ka-GE',
-      'is': 'is-IS',
-      'jv': 'jv-ID',
-      'kk': 'kk-KZ',
-      'km': 'km-KH',
-      'lo': 'lo-LA',
-      'lv': 'lv-LV',
-      'lt': 'lt-LT',
-      'mk': 'mk-MK',
-      'mn': 'mn-MN',
-      'my': 'my-MM',
-      'ne': 'ne-NP',
-      'si': 'si-LK',
-      'sk': 'sk-SK',
-      'sl': 'sl-SI',
-      'su': 'su-ID',
-      'sw': 'sw-KE',
-      'uz': 'uz-UZ',
-      'cy': 'cy-GB',
-      'zu': 'zu-ZA',
-    };
-
-    const voiceLang = voiceMap[languageCode] || languageCode;
-    
-    // Try to find a voice that matches the language
-    const matchingVoice = voices.find(voice => voice.lang.startsWith(voiceLang)) ||
-                          voices.find(voice => voice.lang.startsWith(languageCode));
-    
-    return matchingVoice || voices[0]; // fallback to first voice if no match
-  };
-
-  const speakText = (text, languageCode) => {
-    if (!text || isSpeaking) {
-      console.log('Cannot speak:', { hasText: !!text, isSpeaking });
-      return;
-    }
-
-    console.log('Starting speech for language:', languageCode, 'Text:', text);
-
-    // Cancel any ongoing speech
-    window.speechSynthesis.cancel();
-
-    // Notify all sockets to pause listening (only if sockets exist)
-    const sockets = Object.values(languageSocketsRef.current);
-    if (sockets.length > 0) {
-      sockets.forEach((socket) => {
-        if (socket && socket.connected) {
-          socket.emit("pause_listening");
-        }
-      });
-    }
-
-    const utterance = new SpeechSynthesisUtterance(text);
-    const voice = getLanguageVoice(languageCode);
-    
-    if (voice) {
-      utterance.voice = voice;
-      utterance.lang = voice.lang;
-      console.log('Using voice:', voice.name, voice.lang);
-    } else {
-      // Fallback to language code
-      utterance.lang = languageCode;
-      console.log('No specific voice found, using language code:', languageCode);
-    }
-
-    utterance.rate = 0.9;
-    utterance.pitch = 1.0;
-    utterance.volume = 1.0;
-
-    setIsSpeaking(true);
-    setCurrentSpeakingLanguage(languageCode);
-
-    utterance.onstart = () => {
-      console.log('Speech started for:', languageCode);
-    };
-
-    utterance.onend = () => {
-      console.log('Speech ended for:', languageCode);
-      setIsSpeaking(false);
-      setCurrentSpeakingLanguage(null);
-      
-      // Notify all sockets to resume listening
-      console.log('Emitting resume_listening to all sockets');
-      Object.values(languageSocketsRef.current).forEach((socket) => {
-        if (socket && socket.connected) {
-          console.log('Sending resume_listening to socket');
-          socket.emit("resume_listening");
-        }
-      });
-    };
-
-    utterance.onerror = (event) => {
-      console.error("Speech synthesis error:", event);
-      setIsSpeaking(false);
-      setCurrentSpeakingLanguage(null);
-      
-      // Resume listening on error
-      console.log('Error occurred, emitting resume_listening to all sockets');
-      Object.values(languageSocketsRef.current).forEach((socket) => {
-        if (socket && socket.connected) {
-          socket.emit("resume_listening");
-        }
-      });
-    };
-
-    // Fallback: if onend doesn't fire within 30 seconds, resume anyway
-    const fallbackTimeout = setTimeout(() => {
-      if (isSpeaking) {
-        console.log('Fallback: resuming listening after timeout');
-        window.speechSynthesis.cancel();
-        setIsSpeaking(false);
-        setCurrentSpeakingLanguage(null);
-        Object.values(languageSocketsRef.current).forEach((socket) => {
-          if (socket && socket.connected) {
-            socket.emit("resume_listening");
-          }
-        });
-      }
-    }, 30000);
-
-    // Clear fallback when speech ends normally
-    utterance.onend = () => {
-      clearTimeout(fallbackTimeout);
-      console.log('Speech ended for:', languageCode);
-      setIsSpeaking(false);
-      setCurrentSpeakingLanguage(null);
-      
-      // Notify all sockets to resume listening
-      console.log('Emitting resume_listening to all sockets');
-      Object.values(languageSocketsRef.current).forEach((socket) => {
-        if (socket && socket.connected) {
-          console.log('Sending resume_listening to socket');
-          socket.emit("resume_listening");
-        }
-      });
-    };
-
-    window.speechSynthesis.speak(utterance);
-  };
-
-  const speakAll = async () => {
-    if (isSpeaking || selectedLanguages.length === 0) return;
-
-    // Function to speak one language and wait for completion
-    const speakLanguage = (lang) => {
-      return new Promise((resolve) => {
-        const text = transcripts[lang.code];
-        if (!text) {
-          resolve();
-          return;
-        }
-
-        window.speechSynthesis.cancel();
-        const utterance = new SpeechSynthesisUtterance(text);
-        const voice = getLanguageVoice(lang.code);
-        
-        if (voice) {
-          utterance.voice = voice;
-          utterance.lang = voice.lang;
-        }
-
-        utterance.rate = 0.9;
-        utterance.pitch = 1.0;
-        utterance.volume = 1.0;
-
-        setCurrentSpeakingLanguage(lang.code);
-
-        utterance.onend = () => {
-          console.log('speakAll: finished speaking', lang.name);
-          setCurrentSpeakingLanguage(null);
-          resolve();
-        };
-
-        utterance.onerror = (event) => {
-          console.error("speakAll: Speech synthesis error:", event);
-          setCurrentSpeakingLanguage(null);
-          resolve();
-        };
-
-        window.speechSynthesis.speak(utterance);
-      });
-    };
-
-    console.log('speakAll: Starting, pausing listening');
-    
-    // Pause listening
-    Object.values(languageSocketsRef.current).forEach((socket) => {
-      if (socket && socket.connected) {
-        socket.emit("pause_listening");
-      }
-    });
-
-    setIsSpeaking(true);
-
-    // Speak each language sequentially
-    for (const lang of selectedLanguages) {
-      await speakLanguage(lang);
-    }
-
-    console.log('speakAll: Finished all, resuming listening');
-    setIsSpeaking(false);
-    
-    // Resume listening after all languages are spoken
-    Object.values(languageSocketsRef.current).forEach((socket) => {
-      if (socket && socket.connected) {
-        socket.emit("resume_listening");
-      }
-    });
-  };
-
-  const stopSpeaking = () => {
-    console.log('Stopping speech');
-    window.speechSynthesis.cancel();
-    setIsSpeaking(false);
-    setCurrentSpeakingLanguage(null);
-    
-    // Resume listening
-    const sockets = Object.values(languageSocketsRef.current);
-    if (sockets.length > 0) {
-      sockets.forEach((socket) => {
-        if (socket && socket.connected) {
-          socket.emit("resume_listening");
-        }
-      });
-    }
-  };
-
-  // Load voices when component mounts
-  useEffect(() => {
-    // Load voices
-    const loadVoices = () => {
-      window.speechSynthesis.getVoices();
-    };
-    
-    loadVoices();
-    
-    // Chrome requires this event listener
-    if (window.speechSynthesis.onvoiceschanged !== undefined) {
-      window.speechSynthesis.onvoiceschanged = loadVoices;
-    }
-
     return () => {
-      // Cancel any ongoing speech on unmount
-      window.speechSynthesis.cancel();
+      socket.disconnect();
+      socketRef.current = null;
     };
   }, []);
+  useEffect(() => {
+    if (socketRef.current?.connected) socketRef.current.emit("setLanguages", codes);
+  }, [codes]);
 
-  // Calculate dynamic height and max lines based on number of languages
-  const getLanguageHeight = () => {
-    const count = selectedLanguages.length;
-    return `${100 / count}%`;
-  };
+  // Measure every panel so the text can be fitted to it; re-measures on window resize and fullscreen.
+  useEffect(() => {
+    const observer = new ResizeObserver((entries) => {
+      setSizes((prev) => {
+        const next = { ...prev };
+        for (const entry of entries) next[entry.target.dataset.code] = { w: entry.contentRect.width, h: entry.contentRect.height };
+        return next;
+      });
+    });
+    observerRef.current = observer;
+    return () => observer.disconnect();
+  }, []);
+  useLayoutEffect(() => {
+    const observer = observerRef.current;
+    if (!observer) return;
+    observer.disconnect();
+    for (const el of panelEls.current.values()) observer.observe(el);
+  }, [codes, controlsVisible]);
 
-  const getMaxLines = () => {
-    // Subtitle style: always 2 lines max
-    return 2;
-  };
+  // Fullscreen + auto-hiding controls.
+  useEffect(() => {
+    const onChange = () => setFullscreen(Boolean(document.fullscreenElement));
+    document.addEventListener("fullscreenchange", onChange);
+    return () => document.removeEventListener("fullscreenchange", onChange);
+  }, []);
+  const wakeControls = useCallback(() => {
+    setControlsVisible(true);
+    clearTimeout(hideTimer.current);
+    if (document.fullscreenElement) hideTimer.current = setTimeout(() => setControlsVisible(false), HIDE_CONTROLS_AFTER_MS);
+  }, []);
+  useEffect(() => {
+    if (fullscreen) wakeControls();
+    else {
+      clearTimeout(hideTimer.current);
+      setControlsVisible(true);
+    }
+    return () => clearTimeout(hideTimer.current);
+  }, [fullscreen, wakeControls]);
+  useEffect(() => {
+    window.addEventListener("mousemove", wakeControls);
+    return () => window.removeEventListener("mousemove", wakeControls);
+  }, [wakeControls]);
 
-  // Font size controls
-  const increaseFontSize = () => {
-    setFontSize((prev) => Math.min(prev + 0.25, 4)); // Max 4rem
-  };
+  const toggleFullscreen = useCallback(() => {
+    if (document.fullscreenElement) document.exitFullscreen?.();
+    else document.documentElement.requestFullscreen?.().catch(() => {});
+  }, []);
+  const bump = useCallback((delta) => setScale((s) => Math.min(SCALE_MAX, Math.max(SCALE_MIN, Math.round((s + delta) * 100) / 100))), []);
+  const clearAll = useCallback(() => {
+    setBuffers({});
+    setVersions({});
+    setLatest({});
+  }, []);
+  const speakCodes = useCallback((list) => {
+    const speaker = speakerRef.current;
+    const items = list.map((code) => [code, buffersRef.current[code]]).filter(([, text]) => text);
+    if (!speaker || items.length === 0) return;
+    speaker.cancel();
+    socketRef.current?.emit("pause_listening");
+    speakingRef.current = true;
+    setSpeaking({ active: true, lang: items[0][0] });
+    setTimeout(() => {
+      for (const [code, text] of items) speaker.enqueue(tailOf(text, SPEAK_CHARS, isCJK(code)), code);
+    }, 60);
+  }, []);
+  const speakAll = useCallback(() => speakCodes(selectedRef.current), [speakCodes]);
+  const speakOne = useCallback((code) => speakCodes([code]), [speakCodes]);
+  const stopSpeaking = useCallback(() => {
+    speakerRef.current?.cancel();
+    speakingRef.current = false;
+    setSpeaking({ active: false, lang: null });
+    socketRef.current?.emit("resume_listening");
+  }, []);
+  const toggleTheme = useCallback(() => setTheme((t) => (t === "dark" ? "light" : "dark")), []);
 
-  const decreaseFontSize = () => {
-    setFontSize((prev) => Math.max(prev - 0.25, 0.75)); // Min 0.75rem
-  };
+  // Keyboard: F fullscreen, +/- text size, S speak/stop, C clear, T theme.
+  useEffect(() => {
+    const onKey = (event) => {
+      if (event.target && /^(INPUT|TEXTAREA|SELECT)$/.test(event.target.tagName)) return;
+      const key = event.key.toLowerCase();
+      if (key === "f") toggleFullscreen();
+      else if (key === "+" || key === "=") bump(0.1);
+      else if (key === "-") bump(-0.1);
+      else if (key === "c") clearAll();
+      else if (key === "t") toggleTheme();
+      else if (key === "s") (speakingRef.current ? stopSpeaking : speakAll)();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [toggleFullscreen, bump, clearAll, toggleTheme, stopSpeaking, speakAll]);
 
-  const getFontSize = () => {
-    // Use base fontSize, slightly adjusted by language count
-    const count = selectedLanguages.length;
-    let multiplier = 1;
-    if (count >= 5) multiplier = 0.85;
-    else if (count >= 4) multiplier = 0.9;
-    else if (count >= 3) multiplier = 0.95;
-    return `${fontSize * multiplier}rem`;
-  };
-
-  const getHeaderFontSize = () => {
-    // Header is slightly smaller than content
-    return `${fontSize * 0.7}rem`;
-  };
-
-  const getPadding = () => {
-    // Scale padding with font size
-    const basePad = fontSize * 0.5;
-    return `${basePad}rem ${basePad * 1.2}rem`;
-  };
-
-  const getHeaderPadding = () => {
-    const basePad = fontSize * 0.35;
-    return `${basePad}rem ${basePad * 1.5}rem`;
-  };
-
-  const getLineHeight = () => {
-    // Slightly tighter line height for larger fonts
-    if (fontSize >= 2.5) return '1.3';
-    if (fontSize >= 2) return '1.4';
-    return '1.5';
-  };
-
-  const getGap = () => {
-    const count = selectedLanguages.length;
-    if (count === 1) return '1rem';
-    if (count <= 3) return '0.75rem';
-    return '0.5rem';
-  };
+  const hasText = codes.some((code) => buffers[code]);
+  const columns = selected.length >= 5 ? 2 : 1;
+  const fitted = selected.map((lang) => {
+    const cjk = isCJK(lang.code);
+    const size = sizes[lang.code];
+    const fit = fitPanel(size?.w, size?.h, cjk, scale, (latest[lang.code] || "").length);
+    return { lang, cjk, ...fit, text: tailOf(buffers[lang.code], fit.capacity, cjk, latest[lang.code]) };
+  });
+  const atMax = fitted.some((f) => f.text && f.capped);
 
   return (
-    <div style={{ minHeight: '100vh', background: '#ffffff', color: '#000000' }}>
-      <div className="container-fluid" style={{ padding: '1.5rem' }}>
-        {/* Header with controls */}
-        <div style={{ marginBottom: '2rem' }}>
-          <div className="d-flex justify-content-between align-items-center" style={{ 
-            background: '#f8f9fa',
-            padding: '1.2rem 1.5rem',
-            borderRadius: '12px',
-            border: '2px solid #e9ecef',
-            boxShadow: '0 2px 8px rgba(0, 0, 0, 0.08)'
-          }}>
-            <h1 style={{ fontSize: '1.8rem', marginBottom: 0, fontWeight: '700', letterSpacing: '0.5px', color: '#000000' }}>
-              <i className="bi bi-projector me-3" style={{ color: '#0d6efd' }}></i>
-              Live Transcription
-              {isConnected ? (
-                <span style={{
-                  marginLeft: '1rem',
-                  padding: '0.4rem 0.8rem',
-                  backgroundColor: '#d1f4e0',
-                  border: '2px solid #19ba8b',
-                  borderRadius: '20px',
-                  fontSize: '0.85rem',
-                  display: 'inline-block',
-                  fontWeight: '500',
-                  color: '#0d7a4f'
-                }}>● Connected</span>
-              ) : (
-                <span style={{
-                  marginLeft: '1rem',
-                  padding: '0.4rem 0.8rem',
-                  backgroundColor: '#ffe0e0',
-                  border: '2px solid #dc3545',
-                  borderRadius: '20px',
-                  fontSize: '0.85rem',
-                  display: 'inline-block',
-                  fontWeight: '500',
-                  color: '#c92a2a'
-                }}>● Disconnected</span>
-              )}
-              {isSpeaking && (
-                <span style={{
-                  marginLeft: '1rem',
-                  padding: '0.4rem 0.8rem',
-                  backgroundColor: '#fff3cd',
-                  border: '2px solid #ffc107',
-                  borderRadius: '20px',
-                  fontSize: '0.85rem',
-                  display: 'inline-block',
-                  fontWeight: '500',
-                  color: '#856404'
-                }}>🔊 Speaking...</span>
-              )}
-            </h1>
-            <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
-              {/* Font size controls */}
-              <div style={{ 
-                display: 'flex', 
-                alignItems: 'center', 
-                gap: '0.25rem',
-                backgroundColor: '#e8ecef',
-                padding: '0.3rem 0.5rem',
-                borderRadius: '8px',
-                border: '2px solid #ced4da'
-              }}>
-                <button
-                  onClick={decreaseFontSize}
-                  disabled={fontSize <= 0.75}
-                  style={{
-                    padding: '0.3rem 0.6rem',
-                    backgroundColor: fontSize <= 0.75 ? '#e9ecef' : '#ffffff',
-                    color: fontSize <= 0.75 ? '#adb5bd' : '#495057',
-                    border: '1px solid #ced4da',
-                    borderRadius: '4px',
-                    cursor: fontSize <= 0.75 ? 'not-allowed' : 'pointer',
-                    fontSize: '1rem',
-                    fontWeight: '700',
-                    lineHeight: 1
-                  }}
-                  title="Decrease font size"
-                >
-                  A-
-                </button>
-                <span style={{ 
-                  padding: '0 0.5rem', 
-                  fontSize: '0.85rem', 
-                  fontWeight: '500',
-                  color: '#495057',
-                  minWidth: '3rem',
-                  textAlign: 'center'
-                }}>
-                  {fontSize.toFixed(2)}
-                </span>
-                <button
-                  onClick={increaseFontSize}
-                  disabled={fontSize >= 4}
-                  style={{
-                    padding: '0.3rem 0.6rem',
-                    backgroundColor: fontSize >= 4 ? '#e9ecef' : '#ffffff',
-                    color: fontSize >= 4 ? '#adb5bd' : '#495057',
-                    border: '1px solid #ced4da',
-                    borderRadius: '4px',
-                    cursor: fontSize >= 4 ? 'not-allowed' : 'pointer',
-                    fontSize: '1.1rem',
-                    fontWeight: '700',
-                    lineHeight: 1
-                  }}
-                  title="Increase font size"
-                >
-                  A+
-                </button>
-              </div>
-              
-              {selectedLanguages.length > 0 && (
-                <>
-                  <button style={{
-                    padding: '0.6rem 1.2rem',
-                    backgroundColor: isSpeaking ? '#ffc107' : '#ffffff',
-                    color: isSpeaking ? '#ffffff' : '#0d6efd',
-                    border: '2px solid #0d6efd',
-                    borderRadius: '8px',
-                    cursor: isSpeaking ? 'pointer' : 'pointer',
-                    fontSize: '0.95rem',
-                    fontWeight: '500',
-                    transition: 'all 0.3s ease',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '0.5rem'
-                  }}
-                  onMouseEnter={(e) => {
-                    if (!isSpeaking) {
-                      e.target.style.backgroundColor = '#0d6efd';
-                      e.target.style.color = '#ffffff';
-                      e.target.style.transform = 'scale(1.05)';
-                    }
-                  }}
-                  onMouseLeave={(e) => {
-                    if (!isSpeaking) {
-                      e.target.style.backgroundColor = '#ffffff';
-                      e.target.style.color = '#0d6efd';
-                      e.target.style.transform = 'scale(1)';
-                    }
-                  }}
-                  onClick={isSpeaking ? stopSpeaking : speakAll}
-                  disabled={selectedLanguages.every(lang => !transcripts[lang.code])}
-                  >
-                    {isSpeaking ? (
-                      <>
-                        <i className="bi bi-stop-circle"></i>
-                        Stop
-                      </>
-                    ) : (
-                      <>
-                        <i className="bi bi-play-circle"></i>
-                        Speak All
-                      </>
-                    )}
-                  </button>
-                </>
-              )}
-              <button style={{
-                padding: '0.6rem 1.2rem',
-                backgroundColor: '#ffffff',
-                color: '#dc3545',
-                border: '2px solid #dc3545',
-                borderRadius: '8px',
-                cursor: 'pointer',
-                fontSize: '0.95rem',
-                fontWeight: '500',
-                transition: 'all 0.3s ease',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '0.5rem'
-              }}
-              onMouseEnter={(e) => {
-                e.target.style.backgroundColor = '#dc3545';
-                e.target.style.color = '#ffffff';
-                e.target.style.transform = 'scale(1.05)';
-              }}
-              onMouseLeave={(e) => {
-                e.target.style.backgroundColor = '#ffffff';
-                e.target.style.color = '#dc3545';
-                e.target.style.transform = 'scale(1)';
-              }}
-              onClick={clearTranscripts}>
-                <i className="bi bi-trash"></i>
-                Clear
-              </button>
-            </div>
-          </div>
+    <div className={`stage ${controlsVisible ? "" : "is-hidden-controls"}`} data-theme={theme} data-testid="stage" style={{ "--scale": scale }}>
+      <div className="stage__bar" data-testid="stage-bar">
+        <div className="brand brand--stage">
+          <span className={`live-dot ${connected ? "is-live" : ""}`} />
+          Seamo Live
         </div>
-
-        {/* Language selector */}
-        <div style={{ marginBottom: '2rem' }}>
-          <div style={{
-            background: '#f8f9fa',
-            padding: '1.2rem 1.5rem',
-            borderRadius: '12px',
-            border: '2px solid #e9ecef',
-            boxShadow: '0 2px 8px rgba(0, 0, 0, 0.08)'
-          }}>
-            <label style={{ 
-              fontSize: '1rem', 
-              fontWeight: '600', 
-              marginBottom: '1rem', 
-              display: 'inline-block',
-              color: '#2c3e50',
-              backgroundColor: '#e8ecef',
-              padding: '0.5rem 1rem',
-              borderRadius: '20px'
-            }}>
-              <i className="bi bi-translate me-2" style={{ color: '#0d6efd' }}></i>
-              Select Languages to Display
-            </label>
-              <Select
-                isMulti
-                value={selectedLanguages}
-                onChange={handleLanguageChange}
-                options={availableLanguages}
-                getOptionLabel={(option) => option.name}
-                getOptionValue={(option) => option.code}
-                placeholder="Choose languages..."
-                className="react-select-container"
-                classNamePrefix="react-select"
-                menuPortalTarget={document.body}
-                menuPosition="fixed"
-                styles={{
-                  control: (base) => ({
-                    ...base,
-                    backgroundColor: "#ffffff",
-                    borderColor: "#ced4da",
-                    color: "#000000",
-                    borderRadius: "8px",
-                    border: "2px solid #ced4da",
-                    boxShadow: "0 2px 4px rgba(0, 0, 0, 0.08)",
-                    transition: "all 0.3s ease",
-                  }),
-                  menu: (base) => ({
-                    ...base,
-                    backgroundColor: "#ffffff",
-                    borderRadius: "8px",
-                    border: "2px solid #e9ecef",
-                    boxShadow: "0 4px 12px rgba(0, 0, 0, 0.15)",
-                    zIndex: 9999,
-                  }),
-                  menuPortal: (base) => ({
-                    ...base,
-                    zIndex: 9999,
-                  }),
-                  option: (base, state) => ({
-                    ...base,
-                    backgroundColor: state.isFocused ? "#e7f3ff" : "#ffffff",
-                    color: "#000000",
-                    borderRadius: "4px",
-                    margin: "0.2rem",
-                    transition: "all 0.2s ease",
-                  }),
-                  multiValue: (base) => ({
-                    ...base,
-                    backgroundColor: "#e8ecef",
-                    borderRadius: "6px",
-                  }),
-                  multiValueLabel: (base) => ({
-                    ...base,
-                    color: "#2c3e50",
-                    fontWeight: "500",
-                  }),
-                  singleValue: (base) => ({
-                    ...base,
-                    color: "#000000",
-                  }),
-                }}
-              />
-          </div>
+        <div className="stage__select" data-testid="stage-languages">
+          <Select
+            isMulti
+            options={available}
+            value={selected}
+            onChange={(value) => setSelected(value || [])}
+            getOptionLabel={(option) => option.name}
+            getOptionValue={(option) => option.code}
+            placeholder="Add the languages to show…"
+            styles={selectStyles(theme, { minHeight: 38 })}
+            menuPortalTarget={document.body}
+            menuPosition="fixed"
+            closeMenuOnSelect={false}
+            inputId="stage-language-input"
+          />
         </div>
-
-        {/* Transcripts display */}
-        {selectedLanguages.length === 0 ? (
-          <div style={{ textAlign: 'center', padding: '3rem' }}>
-            <i className="bi bi-info-circle" style={{ fontSize: "4rem", opacity: 0.3, display: 'block', marginBottom: '1rem', color: '#6c757d' }}></i>
-            <p style={{ fontSize: '1.1rem', color: '#6c757d' }}>Select languages above to start displaying transcripts</p>
+        <div className="stage__tools">
+          <div className="seg" role="group" aria-label="Text size">
+            <button type="button" onClick={() => bump(-0.1)} title="Smaller text (−)" aria-label="Smaller text" data-testid="text-smaller">
+              A−
+            </button>
+            <span className="seg__label" data-testid="scale-label" title={atMax ? "Larger would cut the latest sentence" : undefined}>
+              {atMax ? "max" : `${Math.round(scale * 100)}%`}
+            </span>
+            <button type="button" onClick={() => bump(0.1)} title="Bigger text (+)" aria-label="Bigger text" data-testid="text-bigger">
+              A+
+            </button>
           </div>
-        ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: getGap(), height: 'calc(100vh - 280px)' }}>
-            {selectedLanguages.map((lang) => (
-              <div 
-                key={lang.code} 
-                style={{ 
-                  height: getLanguageHeight(),
-                  display: 'flex',
-                  flexDirection: 'column',
-                  minHeight: 0
+          <button
+            type="button"
+            className={`sbtn ${speaking.active ? "is-active" : ""}`}
+            onClick={speaking.active ? stopSpeaking : speakAll}
+            disabled={!speaking.active && !hasText}
+            title="Read every panel aloud, one after another (S)"
+            data-testid="speak-all"
+          >
+            <i className={`bi ${speaking.active ? "bi-stop-fill" : "bi-megaphone-fill"}`} />
+            {speaking.active ? "Stop" : "Speak all"}
+          </button>
+          <button type="button" className="sbtn" onClick={clearAll} title="Clear all panels (C)" data-testid="clear">
+            <i className="bi bi-eraser-fill" />
+            Clear
+          </button>
+          <button type="button" className="sbtn" onClick={toggleTheme} title="Switch light / dark (T)" aria-label="Switch theme" data-testid="theme-toggle">
+            <i className={`bi ${theme === "dark" ? "bi-sun-fill" : "bi-moon-stars-fill"}`} />
+          </button>
+          <button type="button" className="sbtn sbtn--primary" onClick={toggleFullscreen} title="Fullscreen (F)" data-testid="fullscreen-toggle">
+            <i className={`bi ${fullscreen ? "bi-fullscreen-exit" : "bi-arrows-fullscreen"}`} />
+            {fullscreen ? "Exit" : "Fullscreen"}
+          </button>
+          <span className="stage__hint">F fullscreen · + / − text · S speak · C clear · T theme</span>
+        </div>
+      </div>
+
+      {selected.length === 0 ? (
+        <div className="stage__empty" data-testid="stage-empty">
+          <div className="stage__empty-mark">
+            <i className="bi bi-translate" />
+          </div>
+          <h1>Pick the languages to show</h1>
+          <p>
+            Each one becomes a large caption panel that fills the screen. Press <kbd>F</kbd> for fullscreen once you are set; the controls hide
+            themselves and come back when the mouse moves.
+          </p>
+        </div>
+      ) : (
+        <div className="stage__panels" data-cols={columns}>
+          {fitted.map(({ lang, fontSize, text }) => {
+            return (
+              <section
+                key={lang.code}
+                className={`panel ${speaking.lang === lang.code ? "is-speaking" : ""}`}
+                data-code={lang.code}
+                data-testid={`panel-${lang.code}`}
+                ref={(el) => {
+                  if (el) panelEls.current.set(lang.code, el);
+                  else panelEls.current.delete(lang.code);
                 }}
               >
-                <div style={{
-                  display: 'flex',
-                  flexDirection: 'column',
-                  padding: 0,
-                  margin: 0,
-                  height: '100%',
-                  backgroundColor: '#ffffff',
-                  border: '2px solid #e9ecef',
-                  borderRadius: '12px',
-                  overflow: 'hidden',
-                  boxShadow: '0 4px 12px rgba(0, 0, 0, 0.1)',
-                  transition: 'all 0.3s ease'
-                }}>
-                  <div style={{
-                    padding: getHeaderPadding(),
-                    marginBottom: 0,
-                    background: currentSpeakingLanguage === lang.code ? '#fff3cd' : '#e8ecef',
-                    borderBottom: 'none',
-                    borderRadius: '8px 8px 0 0',
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center'
-                  }}>
-                    <h5 style={{ marginBottom: 0, fontSize: getHeaderFontSize(), fontWeight: '600', letterSpacing: '0.3px', color: '#2c3e50' }}>
-                      <i className="bi bi-chat-dots me-2" style={{ color: '#0d6efd' }}></i>
-                      {lang.name}
-                    </h5>
-                    <button
-                      onClick={() => speakText(transcripts[lang.code], lang.code)}
-                      disabled={!transcripts[lang.code] || isSpeaking}
-                      style={{
-                        background: 'transparent',
-                        border: 'none',
-                        cursor: (!transcripts[lang.code] || isSpeaking) ? 'not-allowed' : 'pointer',
-                        fontSize: getHeaderFontSize(),
-                        color: currentSpeakingLanguage === lang.code ? '#ffc107' : '#0d6efd',
-                        opacity: (!transcripts[lang.code] || isSpeaking) ? 0.4 : 1,
-                        transition: 'all 0.2s ease',
-                        padding: '0.25rem 0.5rem',
-                        borderRadius: '4px'
-                      }}
-                      onMouseEnter={(e) => {
-                        if (transcripts[lang.code] && !isSpeaking) {
-                          e.target.style.backgroundColor = '#e7f3ff';
-                          e.target.style.transform = 'scale(1.1)';
-                        }
-                      }}
-                      onMouseLeave={(e) => {
-                        e.target.style.backgroundColor = 'transparent';
-                        e.target.style.transform = 'scale(1)';
-                      }}
-                      title={isSpeaking ? 'Speaking...' : 'Click to speak this language'}
-                    >
-                      {currentSpeakingLanguage === lang.code ? (
-                        <i className="bi bi-volume-up-fill"></i>
-                      ) : (
-                        <i className="bi bi-volume-up"></i>
-                      )}
-                    </button>
-                  </div>
-                  <div
-                    style={{
-                      flex: 1,
-                      overflow: 'hidden',
-                      fontSize: getFontSize(),
-                      lineHeight: getLineHeight(),
-                      padding: getPadding(),
-                      color: '#000000',
-                      backgroundColor: '#ffffff',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center'
-                    }}
+                <header className="panel__label">
+                  <span>{lang.name}</span>
+                  <button
+                    type="button"
+                    className="panel__speak"
+                    onClick={() => speakOne(lang.code)}
+                    disabled={!buffers[lang.code] || speaking.active}
+                    title="Read this panel aloud"
+                    aria-label={`Read ${lang.name} aloud`}
                   >
-                    {transcripts[lang.code] ? (
-                      <p 
-                        className="mb-0" 
-                        style={{
-                          display: '-webkit-box',
-                          WebkitLineClamp: 2,
-                          WebkitBoxOrient: 'vertical',
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
-                          width: '100%',
-                          margin: 0,
-                          whiteSpace: 'normal',
-                          wordBreak: 'break-word',
-                          overflowWrap: 'break-word',
-                          textAlign: 'center',
-                          color: '#000000',
-                          maxWidth: '100%'
-                        }}
-                      >
-                        {transcripts[lang.code]}
-                      </p>
-                    ) : (
-                      <p className="fst-italic" style={{ margin: 0, color: '#6c757d', textAlign: 'center' }}>Waiting for transcription...</p>
-                    )}
-                  </div>
+                    <i className="bi bi-volume-up-fill" />
+                  </button>
+                </header>
+                <div className={`panel__text ${text ? "" : "is-empty"}`} style={text ? { fontSize: `${fontSize}px` } : undefined} dir="auto" lang={lang.code} data-testid={`text-${lang.code}`}>
+                  {text ? (
+                    <span key={versions[lang.code] || 0}>{text}</span>
+                  ) : (
+                    <span className="panel__waiting">
+                      <i className="live-dot is-live" /> Waiting for the speaker
+                    </span>
+                  )}
                 </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
+              </section>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
